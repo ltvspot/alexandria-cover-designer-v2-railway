@@ -26,15 +26,15 @@ window.Toast = {
 // of the same book don't re-download the cover each time.
 // ============================================================
 window.CoverCache = {
-  _cache: new Map(),   // book_id → { img, medallion, timestamp }
+  _cache: new Map(),   // book_id → { img, baseImg, medallion, timestamp }
   _pending: new Map(), // book_id → Promise (dedup concurrent loads)
 
   has(bookId) { return this._cache.has(bookId); },
 
   get(bookId) { return this._cache.get(bookId) || null; },
 
-  set(bookId, img, medallion) {
-    this._cache.set(bookId, { img, medallion, timestamp: Date.now() });
+  set(bookId, img, medallion, baseImg = img) {
+    this._cache.set(bookId, { img, baseImg, medallion, timestamp: Date.now() });
     // Evict old entries (keep last 20)
     if (this._cache.size > 20) {
       const oldest = this._cache.keys().next().value;
@@ -44,13 +44,13 @@ window.CoverCache = {
 
   // Load a cover with deduplication — multiple jobs for the same book
   // share a single in-flight request.
-  async load(bookId, coverJpgId, googleKey) {
+  async load(bookId, coverJpgId, coverOverlayPngId, googleKey) {
     if (this._cache.has(bookId)) return this._cache.get(bookId);
 
     // Dedup: if another job is already loading this cover, wait for it
     if (this._pending.has(bookId)) return this._pending.get(bookId);
 
-    const loadPromise = this._doLoad(bookId, coverJpgId, googleKey);
+    const loadPromise = this._doLoad(bookId, coverJpgId, coverOverlayPngId, googleKey);
     this._pending.set(bookId, loadPromise);
 
     try {
@@ -61,13 +61,27 @@ window.CoverCache = {
     }
   },
 
-  async _doLoad(bookId, coverJpgId, googleKey) {
-    const img = await Drive.downloadCoverWithRetry(coverJpgId, googleKey);
+  async _doLoad(bookId, coverJpgId, coverOverlayPngId, googleKey) {
+    const baseSourceId = coverJpgId || coverOverlayPngId;
+    if (!baseSourceId) throw new Error('No cover image file ID available');
+
+    const baseImg = await Drive.downloadCoverWithRetry(baseSourceId, googleKey);
+    let img = baseImg;
+
+    if (coverOverlayPngId && coverOverlayPngId !== baseSourceId) {
+      try {
+        img = await Drive.downloadCoverWithRetry(coverOverlayPngId, googleKey);
+        console.log(`Using transparent overlay template for ${bookId}`);
+      } catch (e) {
+        console.warn(`Overlay template failed for ${bookId}: ${e.message}`);
+        img = baseImg;
+      }
+    }
 
     // Detect medallion position
     let medallion = { cx: 2850, cy: 1350, radius: 520, detected: false };
     try {
-      const validation = await Drive.validateCoverTemplate(img);
+      const validation = await Drive.validateCoverTemplate(baseImg);
       if (validation.detected) {
         medallion = { ...validation.medallion, detected: true };
       }
@@ -75,8 +89,8 @@ window.CoverCache = {
       console.warn('Medallion detection skipped:', e.message);
     }
 
-    this.set(bookId, img, medallion);
-    return { img, medallion, timestamp: Date.now() };
+    this.set(bookId, img, medallion, baseImg);
+    return { img, baseImg, medallion, timestamp: Date.now() };
   }
 };
 
@@ -245,22 +259,30 @@ window.JobQueue = {
     this.notify();
 
     let coverImg = null;
+    let coverReferenceImg = null;
     let medCx = parseInt(cx) || 2850;
     let medCy = parseInt(cy) || 1350;
     let medRadius = parseInt(radius) || 520;
     let coverFailed = false;
 
-    if (book && book.cover_jpg_id) {
+    if (book && (book.cover_jpg_id || book.cover_overlay_png_id)) {
       try {
         // B6: Use cache
-        const cached = await CoverCache.load(book.id, book.cover_jpg_id, googleKey);
+        const cached = await CoverCache.load(
+          book.id,
+          book.cover_jpg_id,
+          book.cover_overlay_png_id || null,
+          googleKey
+        );
         coverImg = cached.img;
+        coverReferenceImg = cached.baseImg || cached.img;
         if (cached.medallion.detected) {
           medCx = cached.medallion.cx;
           medCy = cached.medallion.cy;
           medRadius = cached.medallion.radius;
         }
-        this._setSubStatus(job, `Cover loaded (${coverImg.width}\u00d7${coverImg.height})`);
+        const hasOverlay = !!book.cover_overlay_png_id;
+        this._setSubStatus(job, `Cover loaded (${coverImg.width}\u00d7${coverImg.height})${hasOverlay ? ' + overlay template' : ''}`);
       } catch (e) {
         // B5: Explicit cover_failed state
         coverFailed = true;
@@ -408,7 +430,7 @@ window.JobQueue = {
         const composited = Compositor.smartComposite(coverImg, bestImage, medCx, medCy, medRadius);
 
         // C8: Validate that composite actually differs from cover
-        const isValid = this._validateComposite(composited, coverImg, medCx, medCy, medRadius);
+        const isValid = this._validateComposite(composited, coverReferenceImg || coverImg, medCx, medCy, medRadius);
         if (isValid) {
           job.composited_image_blob = Compositor.canvasToDataUrl(composited, 'image/jpeg', 0.6);
           this._setSubStatus(job, 'Composite verified');

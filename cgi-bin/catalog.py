@@ -99,12 +99,21 @@ def sync_catalog():
         parsed = parse_folder_name(folder["name"])
         cover_id = None
         cover_name = None
+        overlay_id = None
+        overlay_name = None
         try:
             files = drive_list_files(folder["id"])
             for f in files:
                 if f.get("mimeType") == "image/jpeg" or f["name"].lower().endswith((".jpg", ".jpeg")):
                     cover_id = f["id"]
                     cover_name = f["name"]
+                    break
+            for f in files:
+                lower = f["name"].lower()
+                is_png = f.get("mimeType") == "image/png" or lower.endswith(".png")
+                if is_png and re.search(r"(overlay|alpha|frame|template|cutout|mask)", lower):
+                    overlay_id = f["id"]
+                    overlay_name = f["name"]
                     break
         except Exception:
             pass
@@ -117,6 +126,8 @@ def sync_catalog():
             "folder_name": folder["name"],
             "cover_jpg_id": cover_id,
             "cover_file_name": cover_name,
+            "cover_overlay_png_id": overlay_id,
+            "cover_overlay_file_name": overlay_name,
             "genre": "",
             "themes": "",
             "era": "",

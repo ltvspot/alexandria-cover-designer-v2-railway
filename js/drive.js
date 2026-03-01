@@ -107,11 +107,18 @@ async function syncCatalog(onProgress) {
     const { number, title, author } = parseBookFolder(folder.name);
 
     let coverFile = null;
+    let overlayFile = null;
     try {
       const files = await listDriveFiles(folder.id, apiKey);
       coverFile = files.find(f =>
         f.mimeType === 'image/jpeg' || f.name.toLowerCase().endsWith('.jpg') || f.name.toLowerCase().endsWith('.jpeg')
       );
+      overlayFile = files.find(f => {
+        const n = (f.name || '').toLowerCase();
+        const isPng = f.mimeType === 'image/png' || n.endsWith('.png');
+        if (!isPng) return false;
+        return /(overlay|alpha|frame|template|cutout|mask)/.test(n);
+      }) || null;
     } catch (e) {
       // Skip folder on error, don't break entire sync
       console.warn(`Failed to list files in ${folder.name}:`, e.message);
@@ -125,6 +132,8 @@ async function syncCatalog(onProgress) {
       folder_name: folder.name,
       cover_jpg_id: coverFile ? coverFile.id : null,
       cover_file_name: coverFile ? coverFile.name : null,
+      cover_overlay_png_id: overlayFile ? overlayFile.id : null,
+      cover_overlay_file_name: overlayFile ? overlayFile.name : null,
       genre: '',
       themes: '',
       era: '',
