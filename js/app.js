@@ -231,7 +231,6 @@ window.JobQueue = {
   // Core job execution — fully hardened
   // ================================================================
   async _executeJob(job, signal) {
-    const apiKey = await DB.getSetting('openrouter_key');
     const googleKey = await DB.getSetting('google_api_key');
     const cx = await DB.getSetting('medallion_cx') || 2850;
     const cy = await DB.getSetting('medallion_cy') || 1350;
@@ -309,7 +308,7 @@ window.JobQueue = {
         }
 
         // D11: OpenRouter fetch with AbortController timeout
-        const response = await OpenRouter.generateImage(prompt, job.model, apiKey, signal, this.GENERATION_TIMEOUT);
+        const response = await OpenRouter.generateImage(prompt, job.model, signal, this.GENERATION_TIMEOUT);
 
         this._setSubStatus(job, 'Parsing response...');
 

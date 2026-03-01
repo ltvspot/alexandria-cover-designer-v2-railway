@@ -32,7 +32,6 @@ const MODEL_MAP = {};
 const MODEL_COSTS = {};
 const MODEL_LABELS = {};
 const MODEL_MODALITY = {};
-const OPENROUTER_DIRECT_URL = 'https://openrouter.ai/api/v1/chat/completions';
 const OPENROUTER_PROXY_URL = '/api/openrouter/chat/completions';
 MODELS.forEach(m => {
   MODEL_MAP[m.id] = m.route;
@@ -44,7 +43,7 @@ MODELS.forEach(m => {
 // D11: Generate image with AbortController + timeout
 // signal: external AbortSignal (from job queue cancel)
 // timeoutMs: auto-abort if API takes too long
-async function generateImage(prompt, modelId, apiKey, signal, timeoutMs) {
+async function generateImage(prompt, modelId, signal, timeoutMs) {
   const model = MODEL_MAP[modelId] || modelId;
   const modality = MODEL_MODALITY[modelId] || 'both';
   const modalities = modality === 'image' ? ['image'] : ['image', 'text'];
@@ -70,37 +69,13 @@ async function generateImage(prompt, modelId, apiKey, signal, timeoutMs) {
       messages: [{ role: 'user', content: [{ type: 'text', text: prompt }] }],
     };
 
-    let resp;
-    let proxyError = null;
-
-    // Primary path: server-side proxy with Railway env key (key never exposed client-side).
-    try {
-      resp = await fetch(OPENROUTER_PROXY_URL, {
-        method: 'POST',
-        signal: controller.signal,
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload),
-      });
-    } catch (e) {
-      proxyError = e;
-    }
-
-    // Fallback path for local/dev if proxy is unavailable and a local key exists.
-    if ((!resp || [404, 405, 503].includes(resp.status)) && apiKey) {
-      resp = await fetch(OPENROUTER_DIRECT_URL, {
-        method: 'POST',
-        signal: controller.signal,
-        headers: {
-          'Authorization': `Bearer ${apiKey}`,
-          'Content-Type': 'application/json',
-          'HTTP-Referer': 'https://alexandria-cover-designer.app',
-          'X-Title': 'Alexandria Cover Designer',
-        },
-        body: JSON.stringify(payload),
-      });
-    } else if (!resp && proxyError) {
-      throw proxyError;
-    }
+    // Single path: server-side proxy with Railway env key (key never exposed client-side).
+    const resp = await fetch(OPENROUTER_PROXY_URL, {
+      method: 'POST',
+      signal: controller.signal,
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
 
     clearTimeout(timeoutId);
 

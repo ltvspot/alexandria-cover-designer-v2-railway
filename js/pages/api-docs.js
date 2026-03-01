@@ -140,7 +140,7 @@ Drive.downloadCoverAsBlob(fileId, apiKey)     → Promise&lt;Blob&gt;</div>
       </div>
 
       <div class="code-block">// Generate an image
-OpenRouter.generateImage(prompt, modelId, apiKey) → Promise&lt;response&gt;
+OpenRouter.generateImage(prompt, modelId, signal, timeoutMs) → Promise&lt;response&gt;
 
 // Extract data URL from response
 OpenRouter.extractImageFromResponse(data)         → string|null
