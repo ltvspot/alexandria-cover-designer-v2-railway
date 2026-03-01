@@ -100,7 +100,7 @@ window.Pages.settings = {
             <div class="medallion-preview" id="medallionPreview">
               <div class="medallion-circle" id="medallionCircle"></div>
             </div>
-            <span class="form-hint mt-8" style="display:block">Cover: 3784×2777px. Default medallion at (2850, 1350) r=520</span>
+            <span class="form-hint mt-8" style="display:block">Cover: 3784x2777px. Default medallion at (2850, 1350) r=520</span>
           </div>
         </div>
       </div>
@@ -120,7 +120,7 @@ window.Pages.settings = {
     const circle = document.getElementById('medallionCircle');
     if (!preview || !circle) return;
 
-    // Scale: preview is 300×220, cover is 3784×2777
+    // Scale: preview is 300x220, cover is 3784x2777
     const scaleX = 300 / 3784;
     const scaleY = 220 / 2777;
     const scale = Math.min(scaleX, scaleY);
@@ -172,6 +172,7 @@ window.Pages.settings = {
     // Reset
     document.getElementById('resetSettings').addEventListener('click', async () => {
       await DB.dbClear('settings');
+      try { await fetch('/cgi-bin/settings.py/reset', { method: 'POST' }); } catch(e) {}
       await DB.initDefaults();
       Toast.success('Settings reset to defaults');
       this.render();

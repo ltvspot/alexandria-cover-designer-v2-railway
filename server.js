@@ -4,9 +4,14 @@ const path = require("path");
 const { spawn } = require("child_process");
 
 const ROOT_DIR = __dirname;
-const CGI_SCRIPT = path.join(ROOT_DIR, "cgi-bin", "catalog.py");
 const PORT = Number(process.env.PORT) || 3000;
 const CGI_TIMEOUT_MS = 120000;
+
+// Map of CGI routes to their Python scripts
+const CGI_ROUTES = {
+  "/cgi-bin/catalog.py": path.join(ROOT_DIR, "cgi-bin", "catalog.py"),
+  "/cgi-bin/settings.py": path.join(ROOT_DIR, "cgi-bin", "settings.py"),
+};
 
 const MIME_TYPES = {
   ".html": "text/html; charset=utf-8",
@@ -132,8 +137,17 @@ function splitCgiOutput(outputBuffer) {
   return { statusCode, headers, body };
 }
 
-function handleCgi(req, res, pathname, queryString) {
-  const pathInfo = pathname.replace("/cgi-bin/catalog.py", "") || "";
+function findCgiRoute(pathname) {
+  for (const [route, scriptPath] of Object.entries(CGI_ROUTES)) {
+    if (pathname === route || pathname.startsWith(route + "/")) {
+      const pathInfo = pathname.slice(route.length) || "";
+      return { scriptPath, pathInfo };
+    }
+  }
+  return null;
+}
+
+function handleCgi(req, res, scriptPath, pathInfo, queryString) {
   const env = {
     ...process.env,
     REQUEST_METHOD: req.method || "GET",
@@ -143,7 +157,7 @@ function handleCgi(req, res, pathname, queryString) {
     CONTENT_LENGTH: req.headers["content-length"] || "",
   };
 
-  const python = spawn("python3", [CGI_SCRIPT], {
+  const python = spawn("python3", [scriptPath], {
     cwd: ROOT_DIR,
     env,
     stdio: ["pipe", "pipe", "pipe"],
@@ -210,8 +224,10 @@ const server = http.createServer((req, res) => {
   const pathname = requestUrl.pathname;
   const queryString = requestUrl.search ? requestUrl.search.slice(1) : "";
 
-  if (pathname === "/cgi-bin/catalog.py" || pathname.startsWith("/cgi-bin/catalog.py/")) {
-    handleCgi(req, res, pathname, queryString);
+  // Check if this is a CGI route
+  const cgiMatch = findCgiRoute(pathname);
+  if (cgiMatch) {
+    handleCgi(req, res, cgiMatch.scriptPath, cgiMatch.pathInfo, queryString);
     return;
   }
 

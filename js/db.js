@@ -1,5 +1,5 @@
 // db.js — In-memory storage for Alexandria Cover Designer v2
-// Works in sandboxed iframes where persistent storage APIs are unavailable
+// Settings persist to server via CGI-bin endpoint so API keys survive page refreshes
 
 const _stores = {
   books: {},
@@ -10,6 +10,54 @@ const _stores = {
   cost_ledger: {},
   batches: {},
 };
+
+// --- Server-side persistence for settings ---
+// Uses CGI-bin endpoint so settings survive page refreshes
+const CGI_SETTINGS_URL = '/cgi-bin/settings.py';
+
+// Debounced save — batches rapid setSetting calls into one request
+let _saveTimer = null;
+function _persistSettings() {
+  clearTimeout(_saveTimer);
+  _saveTimer = setTimeout(async () => {
+    try {
+      // Convert internal store format { key: { key, value } } → flat { key: value }
+      const flat = {};
+      for (const [k, row] of Object.entries(_stores.settings)) {
+        flat[k] = row.value;
+      }
+      await fetch(CGI_SETTINGS_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(flat),
+      });
+    } catch (e) {
+      console.warn('[db] Failed to persist settings to server:', e.message);
+    }
+  }, 300);
+}
+
+// Load persisted settings from server on startup
+let _serverSettingsLoaded = false;
+async function _loadServerSettings() {
+  try {
+    const resp = await fetch(CGI_SETTINGS_URL);
+    if (resp.ok) {
+      const flat = await resp.json();
+      if (flat && typeof flat === 'object' && Object.keys(flat).length > 0) {
+        // Convert flat { key: value } → internal format { key: { key, value } }
+        for (const [k, v] of Object.entries(flat)) {
+          _stores.settings[k] = { key: k, value: v };
+        }
+        _serverSettingsLoaded = true;
+        return true;
+      }
+    }
+  } catch (e) {
+    console.warn('[db] Could not load settings from server:', e.message);
+  }
+  return false;
+}
 
 const _counters = {};
 
@@ -80,13 +128,21 @@ async function getSetting(key, defaultValue = null) {
 }
 
 async function setSetting(key, value) {
-  return dbPut('settings', { key, value });
+  const result = await dbPut('settings', { key, value });
+  _persistSettings();  // save to server after every settings change
+  return result;
 }
 
 // Initialize default settings (API keys pre-embedded)
+// Only fills in missing keys — never overwrites user-changed values
 async function initDefaults() {
+  // First, try to load persisted settings from the server
+  if (!_serverSettingsLoaded) {
+    await _loadServerSettings();
+  }
+
   const defaults = {
-    openrouter_key: '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',
+    openrouter_key: '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',
     google_api_key: 'AIzaSyAY6XvPxrdS_fMNMZEUkJd7UW9b9yuJDgI',
     drive_source_folder: '1ybFYDJk7Y3VlbsEjRAh1LOfdyVsHM_cS',
     drive_output_folder: '1Vr184ZsX3k38xpmZkd8g2vwB5y9LYMRC',
@@ -98,11 +154,16 @@ async function initDefaults() {
     medallion_cy: 1350,
     medallion_radius: 520,
   };
+  let needsPersist = false;
   for (const [k, v] of Object.entries(defaults)) {
     const existing = await getSetting(k);
     if (existing === null || existing === undefined) {
-      await setSetting(k, v);
+      await dbPut('settings', { key: k, value: v });
+      needsPersist = true;
     }
+  }
+  if (needsPersist) {
+    _persistSettings();  // persist any newly-added defaults
   }
 }
 
