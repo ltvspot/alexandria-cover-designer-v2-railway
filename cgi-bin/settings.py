@@ -16,6 +16,7 @@ import sys
 from pathlib import Path
 
 SETTINGS_FILE = Path("settings_store.json")
+SENSITIVE_KEYS = {"openrouter_key"}
 
 
 def load_settings():
@@ -31,6 +32,34 @@ def load_settings():
 def save_settings(data):
     """Write settings dict to disk."""
     SETTINGS_FILE.write_text(json.dumps(data, indent=2))
+
+
+def env_settings():
+    """Settings sourced from environment variables (survive redeploys)."""
+    mapping = {
+        "google_api_key": "GOOGLE_API_KEY",
+        "drive_source_folder": "DRIVE_SOURCE_FOLDER",
+        "drive_output_folder": "DRIVE_OUTPUT_FOLDER",
+        "drive_winner_folder": "DRIVE_WINNER_FOLDER",
+    }
+    out = {}
+    for setting_key, env_key in mapping.items():
+        value = os.environ.get(env_key, "").strip()
+        if value:
+            out[setting_key] = value
+    return out
+
+
+def effective_settings():
+    """
+    Return runtime settings used by the app.
+    Environment values override file values so rotated keys take effect immediately.
+    """
+    merged = load_settings()
+    merged.update(env_settings())
+    for sensitive_key in SENSITIVE_KEYS:
+        merged.pop(sensitive_key, None)
+    return merged
 
 
 def respond(status, body, content_type="application/json"):
@@ -73,13 +102,16 @@ def main():
             return
 
         current = load_settings()
+        for sensitive_key in SENSITIVE_KEYS:
+            current.pop(sensitive_key, None)
+            incoming.pop(sensitive_key, None)
         current.update(incoming)
         save_settings(current)
-        respond(200, current)
+        respond(200, effective_settings())
         return
 
     # GET / -- return all settings
-    respond(200, load_settings())
+    respond(200, effective_settings())
 
 
 if __name__ == "__main__":

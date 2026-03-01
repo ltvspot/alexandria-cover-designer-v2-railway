@@ -133,7 +133,7 @@ async function setSetting(key, value) {
   return result;
 }
 
-// Initialize default settings (API keys pre-embedded)
+// Initialize default settings
 // Only fills in missing keys — never overwrites user-changed values
 async function initDefaults() {
   // First, try to load persisted settings from the server
@@ -142,7 +142,6 @@ async function initDefaults() {
   }
 
   const defaults = {
-    openrouter_key: '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',
     google_api_key: 'AIzaSyAY6XvPxrdS_fMNMZEUkJd7UW9b9yuJDgI',
     drive_source_folder: '1ybFYDJk7Y3VlbsEjRAh1LOfdyVsHM_cS',
     drive_output_folder: '1Vr184ZsX3k38xpmZkd8g2vwB5y9LYMRC',

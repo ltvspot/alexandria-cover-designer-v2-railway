@@ -6,6 +6,9 @@ const { spawn } = require("child_process");
 const ROOT_DIR = __dirname;
 const PORT = Number(process.env.PORT) || 3000;
 const CGI_TIMEOUT_MS = 300000;
+const OPENROUTER_PROXY_PATH = "/api/openrouter/chat/completions";
+const OPENROUTER_UPSTREAM_URL = "https://openrouter.ai/api/v1/chat/completions";
+const OPENROUTER_PROXY_TIMEOUT_MS = 180000;
 
 // Map of CGI routes to their Python scripts
 const CGI_ROUTES = {
@@ -147,6 +150,102 @@ function findCgiRoute(pathname) {
   return null;
 }
 
+function readRequestBody(req, maxBytes = 2 * 1024 * 1024) {
+  return new Promise((resolve, reject) => {
+    let total = 0;
+    const chunks = [];
+
+    req.on("data", (chunk) => {
+      total += chunk.length;
+      if (total > maxBytes) {
+        reject(new Error("Request body too large"));
+        return;
+      }
+      chunks.push(chunk);
+    });
+
+    req.on("end", () => resolve(Buffer.concat(chunks)));
+    req.on("error", reject);
+  });
+}
+
+function sendCors(res) {
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+}
+
+async function handleOpenRouterProxy(req, res) {
+  sendCors(res);
+
+  if (req.method === "OPTIONS") {
+    res.writeHead(204);
+    res.end();
+    return;
+  }
+
+  if (req.method !== "POST") {
+    sendJson(res, 405, { error: "Method not allowed" });
+    return;
+  }
+
+  const openRouterKey = (process.env.OPENROUTER_API_KEY || "").trim();
+  if (!openRouterKey) {
+    sendJson(res, 503, { error: "OPENROUTER_API_KEY is not configured on server" });
+    return;
+  }
+
+  let bodyBuffer;
+  try {
+    bodyBuffer = await readRequestBody(req);
+  } catch (e) {
+    sendJson(res, 413, { error: e.message || "Payload too large" });
+    return;
+  }
+
+  if (bodyBuffer.length === 0) {
+    sendJson(res, 400, { error: "Request body is required" });
+    return;
+  }
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), OPENROUTER_PROXY_TIMEOUT_MS);
+
+  try {
+    const upstream = await fetch(OPENROUTER_UPSTREAM_URL, {
+      method: "POST",
+      signal: controller.signal,
+      headers: {
+        Authorization: `Bearer ${openRouterKey}`,
+        "Content-Type": "application/json",
+        "HTTP-Referer": "https://alexandria-cover-designer.app",
+        "X-Title": "Alexandria Cover Designer",
+      },
+      body: bodyBuffer,
+    });
+
+    const responseBody = await upstream.arrayBuffer();
+    const responseBuffer = Buffer.from(responseBody);
+
+    res.writeHead(upstream.status, {
+      "Content-Type": upstream.headers.get("content-type") || "application/json; charset=utf-8",
+      "Content-Length": responseBuffer.length,
+      "Access-Control-Allow-Origin": "*",
+      "Access-Control-Allow-Methods": "POST, OPTIONS",
+      "Access-Control-Allow-Headers": "Content-Type",
+    });
+    res.end(responseBuffer);
+  } catch (e) {
+    if (e && e.name === "AbortError") {
+      sendJson(res, 504, { error: "OpenRouter proxy timed out" });
+      return;
+    }
+    sendJson(res, 502, { error: `OpenRouter proxy error: ${e.message}` });
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
 function handleCgi(req, res, scriptPath, pathInfo, queryString) {
   const env = {
     ...process.env,
@@ -191,7 +290,7 @@ function handleCgi(req, res, scriptPath, pathInfo, queryString) {
     clearTimeout(timeout);
 
     if (timedOut) {
-      sendJson(res, 504, { error: "CGI script timed out after 120 seconds" });
+      sendJson(res, 504, { error: `CGI script timed out after ${Math.round(CGI_TIMEOUT_MS / 1000)} seconds` });
       return;
     }
 
@@ -223,6 +322,11 @@ const server = http.createServer((req, res) => {
   const requestUrl = new URL(req.url || "/", `http://${req.headers.host || "localhost"}`);
   const pathname = requestUrl.pathname;
   const queryString = requestUrl.search ? requestUrl.search.slice(1) : "";
+
+  if (pathname === OPENROUTER_PROXY_PATH) {
+    handleOpenRouterProxy(req, res);
+    return;
+  }
 
   // Check if this is a CGI route
   const cgiMatch = findCgiRoute(pathname);

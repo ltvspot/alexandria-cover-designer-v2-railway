@@ -4,7 +4,6 @@ window.Pages.settings = {
   async render() {
     const content = document.getElementById('content');
 
-    const orKey = await DB.getSetting('openrouter_key') || '';
     const gKey = await DB.getSetting('google_api_key') || '';
     const srcFolder = await DB.getSetting('drive_source_folder') || '';
     const outFolder = await DB.getSetting('drive_output_folder') || '';
@@ -23,16 +22,16 @@ window.Pages.settings = {
           <div class="card">
             <div class="form-group">
               <label class="form-label">OpenRouter API Key</label>
-              <input class="form-input" type="password" id="setOrKey" value="${orKey}">
-              <span class="form-hint">Used for image generation</span>
+              <input class="form-input" type="password" id="setOrKey" value="managed-by-server" disabled>
+              <span class="form-hint">Managed on server via Railway variable <code>OPENROUTER_API_KEY</code> (not stored in browser)</span>
             </div>
             <div class="form-group">
               <label class="form-label">Google Cloud API Key</label>
               <input class="form-input" type="password" id="setGKey" value="${gKey}">
               <span class="form-hint">Used for Google Drive access</span>
             </div>
-            <button class="btn btn-sm btn-secondary" onclick="document.getElementById('setOrKey').type = document.getElementById('setOrKey').type === 'password' ? 'text' : 'password'; document.getElementById('setGKey').type = document.getElementById('setGKey').type === 'password' ? 'text' : 'password'">
-              Show/Hide Keys
+            <button class="btn btn-sm btn-secondary" onclick="document.getElementById('setGKey').type = document.getElementById('setGKey').type === 'password' ? 'text' : 'password'">
+              Show/Hide Google Key
             </button>
           </div>
         </div>
@@ -155,7 +154,6 @@ window.Pages.settings = {
 
     // Save
     document.getElementById('saveSettings').addEventListener('click', async () => {
-      await DB.setSetting('openrouter_key', document.getElementById('setOrKey').value.trim());
       await DB.setSetting('google_api_key', document.getElementById('setGKey').value.trim());
       await DB.setSetting('drive_source_folder', document.getElementById('setSrcFolder').value.trim());
       await DB.setSetting('drive_output_folder', document.getElementById('setOutFolder').value.trim());
