@@ -20,6 +20,60 @@ window.Toast = {
   info(msg) { this.show(msg, 'info'); }
 };
 
+const CALIBRATED_MEDALLION = Object.freeze({
+  cx: 2850,
+  cy: 1625,
+  radius: 520,
+  sourceW: 3784,
+  sourceH: 2777,
+});
+
+function getCalibratedMedallionForSize(w = CALIBRATED_MEDALLION.sourceW, h = CALIBRATED_MEDALLION.sourceH) {
+  const sx = w / CALIBRATED_MEDALLION.sourceW;
+  const sy = h / CALIBRATED_MEDALLION.sourceH;
+  const sr = Math.min(sx, sy);
+  return {
+    cx: Math.round(CALIBRATED_MEDALLION.cx * sx),
+    cy: Math.round(CALIBRATED_MEDALLION.cy * sy),
+    radius: Math.round(CALIBRATED_MEDALLION.radius * sr),
+  };
+}
+
+function sanitizeMedallionGeometry(cx, cy, radius, coverImg = null) {
+  const w = coverImg?.width || CALIBRATED_MEDALLION.sourceW;
+  const h = coverImg?.height || CALIBRATED_MEDALLION.sourceH;
+  const safe = getCalibratedMedallionForSize(w, h);
+  const sx = w / CALIBRATED_MEDALLION.sourceW;
+  const sy = h / CALIBRATED_MEDALLION.sourceH;
+  const sr = Math.min(sx, sy);
+
+  let outCx = Number.parseInt(cx, 10);
+  let outCy = Number.parseInt(cy, 10);
+  let outR = Number.parseInt(radius, 10);
+
+  if (!Number.isFinite(outCx)) outCx = safe.cx;
+  if (!Number.isFinite(outCy)) outCy = safe.cy;
+  if (!Number.isFinite(outR)) outR = safe.radius;
+
+  const legacyCy = Math.round(1350 * sy);
+  if (Math.abs(outCy - legacyCy) <= 2) {
+    outCy = safe.cy;
+  }
+
+  const minCx = Math.round(safe.cx - 140 * sx);
+  const maxCx = Math.round(safe.cx + 140 * sx);
+  const minCy = Math.round(safe.cy - 170 * sy);
+  const maxCy = Math.round(safe.cy + 170 * sy);
+  const minR = Math.round(safe.radius * 0.82);
+  const maxR = Math.round(safe.radius * 1.15);
+
+  if (outCx < minCx || outCx > maxCx) outCx = safe.cx;
+  if (outCy < minCy || outCy > maxCy) outCy = safe.cy;
+  if (outR < minR || outR > maxR) outR = safe.radius;
+
+  return { cx: outCx, cy: outCy, radius: outR, safe };
+}
+
 // ============================================================
 // Cover Image Cache — B6
 // Keeps downloaded cover images in memory so multiple variants
@@ -79,7 +133,7 @@ window.CoverCache = {
     }
 
     // Detect medallion position
-    let medallion = { cx: 2850, cy: 1350, radius: 520, detected: false };
+    let medallion = { ...CALIBRATED_MEDALLION, detected: false };
     try {
       const validation = await Drive.validateCoverTemplate(baseImg);
       if (validation.detected) {
@@ -246,9 +300,9 @@ window.JobQueue = {
   // ================================================================
   async _executeJob(job, signal) {
     const googleKey = await DB.getSetting('google_api_key');
-    const cx = await DB.getSetting('medallion_cx') || 2850;
-    const cy = await DB.getSetting('medallion_cy') || 1350;
-    const radius = await DB.getSetting('medallion_radius') || 520;
+    const cx = await DB.getSetting('medallion_cx') || CALIBRATED_MEDALLION.cx;
+    const cy = await DB.getSetting('medallion_cy') || CALIBRATED_MEDALLION.cy;
+    const radius = await DB.getSetting('medallion_radius') || CALIBRATED_MEDALLION.radius;
 
     const book = await DB.dbGet('books', job.book_id);
 
@@ -260,9 +314,9 @@ window.JobQueue = {
 
     let coverImg = null;
     let coverReferenceImg = null;
-    let medCx = parseInt(cx) || 2850;
-    let medCy = parseInt(cy) || 1350;
-    let medRadius = parseInt(radius) || 520;
+    let medCx = parseInt(cx, 10) || CALIBRATED_MEDALLION.cx;
+    let medCy = parseInt(cy, 10) || CALIBRATED_MEDALLION.cy;
+    let medRadius = parseInt(radius, 10) || CALIBRATED_MEDALLION.radius;
     let coverFailed = false;
 
     if (book && (book.cover_jpg_id || book.cover_overlay_png_id)) {
@@ -276,25 +330,39 @@ window.JobQueue = {
         );
         coverImg = cached.img;
         coverReferenceImg = cached.baseImg || cached.img;
-        // Guardrail: only accept auto-detected medallion geometry when it is
-        // very close to configured defaults. Wild detections caused tiny/off-
-        // center inserts on some covers.
-        if (cached.medallion.detected) {
-          const detected = cached.medallion;
-          const closeToDefaults =
-            Math.abs((detected.cx || 0) - medCx) <= 80 &&
-            Math.abs((detected.cy || 0) - medCy) <= 80 &&
-            Math.abs((detected.radius || 0) - medRadius) <= 120;
+        // First lock configured geometry to calibrated safe bounds.
+        const normalizedConfig = sanitizeMedallionGeometry(medCx, medCy, medRadius, coverImg);
+        medCx = normalizedConfig.cx;
+        medCy = normalizedConfig.cy;
+        medRadius = normalizedConfig.radius;
 
-          if (closeToDefaults) {
+        // Optional micro-adjustment from auto-detection, but only when it stays
+        // very close to the calibrated geometry.
+        if (cached.medallion.detected) {
+          const detected = sanitizeMedallionGeometry(
+            cached.medallion.cx,
+            cached.medallion.cy,
+            cached.medallion.radius,
+            coverImg
+          );
+          const allowDetected =
+            Math.abs(detected.cx - normalizedConfig.safe.cx) <= Math.round(60 * (coverImg.width / CALIBRATED_MEDALLION.sourceW)) &&
+            Math.abs(detected.cy - normalizedConfig.safe.cy) <= Math.round(60 * (coverImg.height / CALIBRATED_MEDALLION.sourceH)) &&
+            Math.abs(detected.radius - normalizedConfig.safe.radius) <= Math.round(70 * (Math.min(coverImg.width / CALIBRATED_MEDALLION.sourceW, coverImg.height / CALIBRATED_MEDALLION.sourceH)));
+
+          if (allowDetected) {
             medCx = detected.cx;
             medCy = detected.cy;
             medRadius = detected.radius;
+            console.log(
+              `Using calibrated auto-detected medallion for ${book.id}: ` +
+              `(${medCx},${medCy},r${medRadius})`
+            );
           } else {
             console.warn(
-              `Ignoring outlier medallion detection for ${book.id}: ` +
-              `detected=(${detected.cx},${detected.cy},r${detected.radius}) ` +
-              `defaults=(${medCx},${medCy},r${medRadius})`
+              `Ignoring unstable medallion detection for ${book.id}: ` +
+              `detected=(${cached.medallion.cx},${cached.medallion.cy},r${cached.medallion.radius}) ` +
+              `safe=(${normalizedConfig.safe.cx},${normalizedConfig.safe.cy},r${normalizedConfig.safe.radius})`
             );
           }
         }

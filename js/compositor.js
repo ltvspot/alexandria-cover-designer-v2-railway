@@ -10,7 +10,7 @@
 // This aligns with the "adjust source files / transparent template" approach
 // from the MEDALLION-FIX report and avoids fragile runtime boundary detection.
 
-const INNER_RADIUS_BASE_RATIO = 420 / 520;
+const INNER_RADIUS_BASE_RATIO = 0.84;
 const INNER_RADIUS_MIN_RATIO = 0.74;
 const INNER_RADIUS_MAX_RATIO = 0.92;
 const INNER_RADIUS_SCALE_STEPS = [1.0, 0.98, 0.96, 0.94];
@@ -118,7 +118,7 @@ function _estimateFallbackFillColor(imageElement) {
 // ---------------------------------------------------------------------------
 // compositeOnCover — backward compat wrapper
 // ---------------------------------------------------------------------------
-function compositeOnCover(coverImg, generatedImg, cx = 2850, cy = 1350, radius = 520) {
+function compositeOnCover(coverImg, generatedImg, cx = 2850, cy = 1625, radius = 520) {
   return smartComposite(coverImg, generatedImg, cx, cy, radius);
 }
 
@@ -266,7 +266,7 @@ function _measureOuterEdgeDiffPixels(ctx, coverCtx, cx, cy, maskRadius, W, H) {
 // ---------------------------------------------------------------------------
 // smartComposite — source-overlay mask compositing
 // ---------------------------------------------------------------------------
-function smartComposite(coverImg, generatedImg, cx = 2850, cy = 1350, radius = 520) {
+function smartComposite(coverImg, generatedImg, cx = 2850, cy = 1625, radius = 520) {
   const W = coverImg.width || 3784;
   const H = coverImg.height || 2777;
 

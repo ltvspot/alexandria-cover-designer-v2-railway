@@ -164,7 +164,7 @@ Compositor.compositeOnCover(
   coverImg,        // HTMLImageElement of cover (3784×2777)
   generatedImg,    // HTMLImageElement of AI-generated illustration
   cx = 2850,       // Medallion center X
-  cy = 1350,       // Medallion center Y
+  cy = 1625,       // Medallion center Y
   radius = 520,    // Medallion radius
   feather = 15     // Edge feather in pixels
 ) → HTMLCanvasElement
@@ -179,7 +179,7 @@ Compositor.canvasToBlob(canvas, type, quality)   → Promise&lt;Blob&gt;
 Compositor.canvasToDataUrl(canvas, type, quality) → string</div>
 
       <h4 style="font-size:13px;font-weight:600;margin:16px 0 8px">Cover Layout</h4>
-      <p class="text-sm text-muted">Covers are 3784×2777px wraparound (back + spine + front). The medallion goes on the front panel, default center at (2850, 1350) with radius 520px.</p>
+      <p class="text-sm text-muted">Covers are 3784×2777px wraparound (back + spine + front). The medallion goes on the front panel, default center at (2850, 1625) with radius 520px.</p>
     `;
   },
 

@@ -150,7 +150,7 @@ async function initDefaults() {
     default_variant_count: 1,
     quality_threshold: 0.6,
     medallion_cx: 2850,
-    medallion_cy: 1350,
+    medallion_cy: 1625,
     medallion_radius: 520,
   };
   let needsPersist = false;
@@ -161,6 +161,16 @@ async function initDefaults() {
       needsPersist = true;
     }
   }
+
+  // Migration: legacy project state used cy=1350, which places the medallion
+  // too high on the current cover set. Auto-upgrade once to the calibrated
+  // baseline to prevent tiny/misaligned inserts.
+  const legacyCy = await getSetting('medallion_cy');
+  if (Number(legacyCy) === 1350) {
+    await dbPut('settings', { key: 'medallion_cy', value: 1625 });
+    needsPersist = true;
+  }
+
   if (needsPersist) {
     _persistSettings();  // persist any newly-added defaults
   }

@@ -11,7 +11,7 @@ window.Pages.settings = {
     const defVariants = await DB.getSetting('default_variant_count') || 1;
     const qualThreshold = await DB.getSetting('quality_threshold') || 0.6;
     const medCx = await DB.getSetting('medallion_cx') || 2850;
-    const medCy = await DB.getSetting('medallion_cy') || 1350;
+    const medCy = await DB.getSetting('medallion_cy') || 1625;
     const medR = await DB.getSetting('medallion_radius') || 520;
 
     content.innerHTML = `
@@ -99,7 +99,7 @@ window.Pages.settings = {
             <div class="medallion-preview" id="medallionPreview">
               <div class="medallion-circle" id="medallionCircle"></div>
             </div>
-            <span class="form-hint mt-8" style="display:block">Cover: 3784x2777px. Default medallion at (2850, 1350) r=520</span>
+            <span class="form-hint mt-8" style="display:block">Cover: 3784x2777px. Default medallion at (2850, 1625) r=520</span>
           </div>
         </div>
       </div>
@@ -161,7 +161,7 @@ window.Pages.settings = {
       await DB.setSetting('default_variant_count', parseInt(document.getElementById('setDefVariants').value) || 1);
       await DB.setSetting('quality_threshold', parseInt(document.getElementById('setQualThreshold').value) / 100);
       await DB.setSetting('medallion_cx', parseInt(document.getElementById('setMedCx').value) || 2850);
-      await DB.setSetting('medallion_cy', parseInt(document.getElementById('setMedCy').value) || 1350);
+      await DB.setSetting('medallion_cy', parseInt(document.getElementById('setMedCy').value) || 1625);
       await DB.setSetting('medallion_radius', parseInt(document.getElementById('setMedR').value) || 520);
 
       Toast.success('Settings saved');

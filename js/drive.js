@@ -358,7 +358,7 @@ async function detectMedallionPosition(imageElement) {
 // returns the detected position (or the defaults if detection fails).
 async function validateCoverTemplate(imageElement) {
   const detected = await detectMedallionPosition(imageElement);
-  const defaults = { cx: 2850, cy: 1350, radius: 520, confidence: 0 };
+  const defaults = { cx: 2850, cy: 1625, radius: 520, confidence: 0 };
 
   if (!detected || detected.confidence < 0.3) {
     return { valid: true, medallion: defaults, detected: false };
