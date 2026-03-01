@@ -1,0 +1,12 @@
+{
+  "name": "alexandria-cover-designer-v2",
+  "version": "2.0.0",
+  "description": "Alexandria Cover Designer v2 — AI book cover illustration tool",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
