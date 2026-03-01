@@ -5,7 +5,7 @@ const { spawn } = require("child_process");
 
 const ROOT_DIR = __dirname;
 const PORT = Number(process.env.PORT) || 3000;
-const CGI_TIMEOUT_MS = 120000;
+const CGI_TIMEOUT_MS = 300000;
 
 // Map of CGI routes to their Python scripts
 const CGI_ROUTES = {
