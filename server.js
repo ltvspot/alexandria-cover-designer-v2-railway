@@ -175,6 +175,21 @@ function sendCors(res) {
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
 }
 
+function getOpenRouterKeys() {
+  const primary = (process.env.OPENROUTER_API_KEY || "").trim();
+  const keyList = (process.env.OPENROUTER_API_KEYS || "")
+    .split(",")
+    .map((k) => k.trim())
+    .filter(Boolean);
+
+  const merged = [];
+  if (primary) merged.push(primary);
+  for (const k of keyList) {
+    if (!merged.includes(k)) merged.push(k);
+  }
+  return merged;
+}
+
 async function handleOpenRouterProxy(req, res) {
   sendCors(res);
 
@@ -189,9 +204,9 @@ async function handleOpenRouterProxy(req, res) {
     return;
   }
 
-  const openRouterKey = (process.env.OPENROUTER_API_KEY || "").trim();
-  if (!openRouterKey) {
-    sendJson(res, 503, { error: "OPENROUTER_API_KEY is not configured on server" });
+  const openRouterKeys = getOpenRouterKeys();
+  if (openRouterKeys.length === 0) {
+    sendJson(res, 503, { error: "OPENROUTER_API_KEY/OPENROUTER_API_KEYS is not configured on server" });
     return;
   }
 
@@ -212,20 +227,42 @@ async function handleOpenRouterProxy(req, res) {
   const timeout = setTimeout(() => controller.abort(), OPENROUTER_PROXY_TIMEOUT_MS);
 
   try {
-    const upstream = await fetch(OPENROUTER_UPSTREAM_URL, {
-      method: "POST",
-      signal: controller.signal,
-      headers: {
-        Authorization: `Bearer ${openRouterKey}`,
-        "Content-Type": "application/json",
-        "HTTP-Referer": "https://alexandria-cover-designer.app",
-        "X-Title": "Alexandria Cover Designer",
-      },
-      body: bodyBuffer,
-    });
+    let upstream = null;
+    let usedKeyIndex = -1;
+
+    for (let i = 0; i < openRouterKeys.length; i++) {
+      const candidateKey = openRouterKeys[i];
+      const candidateResp = await fetch(OPENROUTER_UPSTREAM_URL, {
+        method: "POST",
+        signal: controller.signal,
+        headers: {
+          Authorization: `Bearer ${candidateKey}`,
+          "Content-Type": "application/json",
+          "HTTP-Referer": "https://alexandria-cover-designer.app",
+          "X-Title": "Alexandria Cover Designer",
+        },
+        body: bodyBuffer,
+      });
+
+      upstream = candidateResp;
+      usedKeyIndex = i;
+
+      // Fail over only for auth/key issues.
+      if ((candidateResp.status === 401 || candidateResp.status === 403) && i < openRouterKeys.length - 1) {
+        process.stdout.write(
+          `OpenRouter auth failed for key #${i + 1}; trying fallback key #${i + 2}\n`
+        );
+        continue;
+      }
+      break;
+    }
 
     const responseBody = await upstream.arrayBuffer();
     const responseBuffer = Buffer.from(responseBody);
+
+    if (usedKeyIndex > 0) {
+      process.stdout.write(`OpenRouter request succeeded with fallback key #${usedKeyIndex + 1}\n`);
+    }
 
     res.writeHead(upstream.status, {
       "Content-Type": upstream.headers.get("content-type") || "application/json; charset=utf-8",
