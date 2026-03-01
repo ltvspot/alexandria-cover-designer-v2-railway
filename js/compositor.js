@@ -10,10 +10,13 @@
 // This aligns with the "adjust source files / transparent template" approach
 // from the MEDALLION-FIX report and avoids fragile runtime boundary detection.
 
-const INNER_RADIUS_BASE_RATIO = 0.84;
-const INNER_RADIUS_MIN_RATIO = 0.74;
-const INNER_RADIUS_MAX_RATIO = 0.92;
-const INNER_RADIUS_SCALE_STEPS = [1.0, 0.98, 0.96, 0.94];
+const INNER_RX_BASE_RATIO = 0.88;
+const INNER_RY_BASE_RATIO = 0.96;
+const INNER_RX_MIN_RATIO = 0.78;
+const INNER_RX_MAX_RATIO = 0.94;
+const INNER_RY_MIN_RATIO = 0.84;
+const INNER_RY_MAX_RATIO = 0.99;
+const INNER_RADIUS_SCALE_STEPS = [1.0, 0.985, 0.97, 0.955];
 const INNER_FEATHER_PX = 8;
 
 const MAX_OUTER_EDGE_DIFF_PIXELS = 36;
@@ -21,9 +24,9 @@ const RING_SAMPLE_COUNT = 180;
 const IMAGE_OVERDRAW_RATIO = 1.12;
 
 // Exported for compatibility with debug/tools.
-const CY_SHIFT_RATIO = 0;
-const RX_RATIO = INNER_RADIUS_BASE_RATIO;
-const RY_RATIO = INNER_RADIUS_BASE_RATIO;
+const CY_SHIFT_RATIO = 0.01;
+const RX_RATIO = INNER_RX_BASE_RATIO;
+const RY_RATIO = INNER_RY_BASE_RATIO;
 const FILL_RATIO = 0.96;
 const RING_WIDTH = 0;
 
@@ -153,35 +156,43 @@ function _drawCoverToCanvas(coverImg, W, H) {
   return { coverCanvas, coverCtx };
 }
 
-function _getRegionBounds(W, H, cx, cy, radius, pad) {
-  const x0 = Math.max(0, Math.floor(cx - radius - pad));
-  const y0 = Math.max(0, Math.floor(cy - radius - pad));
-  const x1 = Math.min(W, Math.ceil(cx + radius + pad));
-  const y1 = Math.min(H, Math.ceil(cy + radius + pad));
+function _getRegionBounds(W, H, cx, cy, rx, ry, pad) {
+  const x0 = Math.max(0, Math.floor(cx - rx - pad));
+  const y0 = Math.max(0, Math.floor(cy - ry - pad));
+  const x1 = Math.min(W, Math.ceil(cx + rx + pad));
+  const y1 = Math.min(H, Math.ceil(cy + ry + pad));
   return { x0, y0, w: Math.max(0, x1 - x0), h: Math.max(0, y1 - y0) };
 }
 
-function _getInnerRadius(outerRadius, scale = 1) {
-  const base = outerRadius * INNER_RADIUS_BASE_RATIO * scale;
-  return Math.max(
-    outerRadius * INNER_RADIUS_MIN_RATIO,
-    Math.min(outerRadius * INNER_RADIUS_MAX_RATIO, base)
+function _getInnerRadii(outerRadius, scale = 1) {
+  const rxBase = outerRadius * INNER_RX_BASE_RATIO * scale;
+  const ryBase = outerRadius * INNER_RY_BASE_RATIO * scale;
+  const rx = Math.max(
+    outerRadius * INNER_RX_MIN_RATIO,
+    Math.min(outerRadius * INNER_RX_MAX_RATIO, rxBase)
   );
+  const ry = Math.max(
+    outerRadius * INNER_RY_MIN_RATIO,
+    Math.min(outerRadius * INNER_RY_MAX_RATIO, ryBase)
+  );
+  return { rx, ry };
 }
 
-function _coverHasTransparentOpening(coverImg, W, H, cx, cy, radius) {
+function _coverHasTransparentOpening(coverImg, W, H, cx, cy, rx, ry) {
   const probe = document.createElement('canvas');
   probe.width = W;
   probe.height = H;
   const pctx = probe.getContext('2d', { willReadFrequently: true });
   pctx.drawImage(coverImg, 0, 0, W, H);
 
+  const sx = rx * 0.14;
+  const sy = ry * 0.14;
   const samplePoints = [
     [cx, cy],
-    [cx + radius * 0.14, cy],
-    [cx - radius * 0.14, cy],
-    [cx, cy + radius * 0.14],
-    [cx, cy - radius * 0.14],
+    [cx + sx, cy],
+    [cx - sx, cy],
+    [cx, cy + sy],
+    [cx, cy - sy],
   ];
 
   for (const [x, y] of samplePoints) {
@@ -193,7 +204,7 @@ function _coverHasTransparentOpening(coverImg, W, H, cx, cy, radius) {
   return false;
 }
 
-function _buildOverlayCanvas(coverImg, W, H, cx, cy, innerRadius, featherPx = INNER_FEATHER_PX) {
+function _buildOverlayCanvas(coverImg, W, H, cx, cy, innerRx, innerRy, featherPx = INNER_FEATHER_PX) {
   const overlay = document.createElement('canvas');
   overlay.width = W;
   overlay.height = H;
@@ -201,27 +212,36 @@ function _buildOverlayCanvas(coverImg, W, H, cx, cy, innerRadius, featherPx = IN
   octx.drawImage(coverImg, 0, 0, W, H);
 
   octx.globalCompositeOperation = 'destination-out';
-  const hardRadius = Math.max(0, innerRadius - featherPx);
-  if (hardRadius > 0) {
+  const hardRx = Math.max(0, innerRx - featherPx);
+  const hardRy = Math.max(0, innerRy - featherPx);
+  if (hardRx > 0 && hardRy > 0) {
     octx.fillStyle = 'rgba(0,0,0,1)';
     octx.beginPath();
-    octx.arc(cx, cy, hardRadius, 0, Math.PI * 2);
+    octx.ellipse(cx, cy, hardRx, hardRy, 0, 0, Math.PI * 2);
     octx.closePath();
     octx.fill();
   }
 
   if (featherPx > 0) {
-    const start = Math.max(0, innerRadius - featherPx);
-    const end = innerRadius + featherPx;
+    const start = Math.max(0, -featherPx);
+    const end = featherPx;
     const span = Math.max(1, end - start);
     octx.lineWidth = 2;
 
-    for (let r = start; r <= end; r += 1) {
-      const t = (r - start) / span; // 0..1
+    for (let d = start; d <= end; d += 1) {
+      const t = (d - start) / span; // 0..1
       const alpha = Math.max(0, 1 - t);
       octx.strokeStyle = `rgba(0,0,0,${alpha.toFixed(3)})`;
       octx.beginPath();
-      octx.arc(cx, cy, r, 0, Math.PI * 2);
+      octx.ellipse(
+        cx,
+        cy,
+        Math.max(1, innerRx + d),
+        Math.max(1, innerRy + d),
+        0,
+        0,
+        Math.PI * 2
+      );
       octx.closePath();
       octx.stroke();
     }
@@ -231,9 +251,9 @@ function _buildOverlayCanvas(coverImg, W, H, cx, cy, innerRadius, featherPx = IN
   return overlay;
 }
 
-function _measureOuterEdgeDiffPixels(ctx, coverCtx, cx, cy, maskRadius, W, H) {
-  const pad = Math.round(maskRadius * 0.25);
-  const { x0, y0, w, h } = _getRegionBounds(W, H, cx, cy, maskRadius, pad);
+function _measureOuterEdgeDiffPixels(ctx, coverCtx, cx, cy, maskRx, maskRy, W, H) {
+  const pad = Math.round(Math.max(maskRx, maskRy) * 0.25);
+  const { x0, y0, w, h } = _getRegionBounds(W, H, cx, cy, maskRx, maskRy, pad);
   if (!w || !h) return 0;
 
   const comp = ctx.getImageData(x0, y0, w, h).data;
@@ -246,8 +266,8 @@ function _measureOuterEdgeDiffPixels(ctx, coverCtx, cx, cy, maskRadius, W, H) {
     const s = Math.sin(theta);
 
     for (const offset of [8, 12, 16]) {
-      const x = Math.round(cx + (maskRadius + offset) * c);
-      const y = Math.round(cy + (maskRadius + offset) * s);
+      const x = Math.round(cx + (maskRx + offset) * c);
+      const y = Math.round(cy + (maskRy + offset) * s);
       const lx = x - x0;
       const ly = y - y0;
       if (lx < 0 || ly < 0 || lx >= w || ly >= h) continue;
@@ -269,6 +289,7 @@ function _measureOuterEdgeDiffPixels(ctx, coverCtx, cx, cy, maskRadius, W, H) {
 function smartComposite(coverImg, generatedImg, cx = 2850, cy = 1625, radius = 520) {
   const W = coverImg.width || 3784;
   const H = coverImg.height || 2777;
+  const innerCy = cy + Math.round(radius * CY_SHIFT_RATIO);
 
   const detailCenter = findBestCropCenter(generatedImg);
   const cropCenterX = Math.max(0.15, Math.min(0.85, detailCenter.x));
@@ -276,7 +297,15 @@ function smartComposite(coverImg, generatedImg, cx = 2850, cy = 1625, radius = 5
   const fallbackFillColor = _estimateFallbackFillColor(generatedImg);
 
   const { coverCtx } = _drawCoverToCanvas(coverImg, W, H);
-  const hasTransparentOpening = _coverHasTransparentOpening(coverImg, W, H, cx, cy, radius);
+  const hasTransparentOpening = _coverHasTransparentOpening(
+    coverImg,
+    W,
+    H,
+    cx,
+    innerCy,
+    radius * 0.25,
+    radius * 0.25
+  );
 
   let fallbackCanvas = null;
   let bestCanvas = null;
@@ -284,12 +313,11 @@ function smartComposite(coverImg, generatedImg, cx = 2850, cy = 1625, radius = 5
 
   for (let attempt = 0; attempt < INNER_RADIUS_SCALE_STEPS.length; attempt++) {
     const scale = INNER_RADIUS_SCALE_STEPS[attempt];
-    const innerRadius = _getInnerRadius(radius, scale);
-    const drawRadius = Math.round((innerRadius + INNER_FEATHER_PX) * IMAGE_OVERDRAW_RATIO);
-    const drawW = drawRadius * 2;
-    const drawH = drawRadius * 2;
-    const drawX = Math.round(cx - drawRadius);
-    const drawY = Math.round(cy - drawRadius);
+    const { rx: innerRx, ry: innerRy } = _getInnerRadii(radius, scale);
+    const drawW = Math.round((innerRx + INNER_FEATHER_PX) * 2 * IMAGE_OVERDRAW_RATIO);
+    const drawH = Math.round((innerRy + INNER_FEATHER_PX) * 2 * IMAGE_OVERDRAW_RATIO);
+    const drawX = Math.round(cx - drawW / 2);
+    const drawY = Math.round(innerCy - drawH / 2);
 
     const canvas = document.createElement('canvas');
     canvas.width = W;
@@ -310,13 +338,13 @@ function smartComposite(coverImg, generatedImg, cx = 2850, cy = 1625, radius = 5
     // from showing through inside the medallion opening.
     ctx.fillStyle = fallbackFillColor;
     ctx.beginPath();
-    ctx.arc(cx, cy, innerRadius + INNER_FEATHER_PX, 0, Math.PI * 2);
+    ctx.ellipse(cx, innerCy, innerRx + INNER_FEATHER_PX, innerRy + INNER_FEATHER_PX, 0, 0, Math.PI * 2);
     ctx.closePath();
     ctx.fill();
 
     ctx.save();
     ctx.beginPath();
-    ctx.arc(cx, cy, innerRadius, 0, Math.PI * 2);
+    ctx.ellipse(cx, innerCy, innerRx, innerRy, 0, 0, Math.PI * 2);
     ctx.closePath();
     ctx.clip();
     ctx.drawImage(generatedImg, srcX, srcY, srcW, srcH, drawX, drawY, drawW, drawH);
@@ -326,15 +354,24 @@ function smartComposite(coverImg, generatedImg, cx = 2850, cy = 1625, radius = 5
     if (hasTransparentOpening) {
       ctx.drawImage(coverImg, 0, 0, W, H);
     } else {
-      const overlayCanvas = _buildOverlayCanvas(coverImg, W, H, cx, cy, innerRadius, INNER_FEATHER_PX);
+      const overlayCanvas = _buildOverlayCanvas(
+        coverImg,
+        W,
+        H,
+        cx,
+        innerCy,
+        innerRx,
+        innerRy,
+        INNER_FEATHER_PX
+      );
       ctx.drawImage(overlayCanvas, 0, 0);
     }
 
-    const edgeDiff = _measureOuterEdgeDiffPixels(ctx, coverCtx, cx, cy, innerRadius, W, H);
+    const edgeDiff = _measureOuterEdgeDiffPixels(ctx, coverCtx, cx, innerCy, innerRx, innerRy, W, H);
 
     console.log(
-      `[Compositor v12 fixed-template] attempt=${attempt + 1}/${INNER_RADIUS_SCALE_STEPS.length} ` +
-      `scale=${scale.toFixed(2)} innerR=${Math.round(innerRadius)} draw=${drawW} edgeDiff=${edgeDiff} alphaOverlay=${hasTransparentOpening}`
+      `[Compositor v13 ellipse-template] attempt=${attempt + 1}/${INNER_RADIUS_SCALE_STEPS.length} ` +
+      `scale=${scale.toFixed(3)} inner=(${Math.round(innerRx)}x${Math.round(innerRy)}) draw=(${drawW}x${drawH}) edgeDiff=${edgeDiff} alphaOverlay=${hasTransparentOpening}`
     );
 
     fallbackCanvas = canvas;
