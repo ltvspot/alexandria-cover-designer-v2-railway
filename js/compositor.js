@@ -17,14 +17,14 @@ const MASK_BOTTOM_EXPAND_RATIO = 0.058;
 const MASK_SIDE_INDENT_RATIO = 0.029;
 const MASK_OVAL_BIAS_RATIO = 0.029;
 
-const MASK_SCALE_START = 1.02;
+const MASK_SCALE_START = 1.0;
 const MASK_SCALE_STEP = 0.02;
-const MASK_SCALE_MIN = 0.84;
+const MASK_SCALE_MIN = 0.86;
 const MAX_COMPOSE_ATTEMPTS = Math.floor((MASK_SCALE_START - MASK_SCALE_MIN) / MASK_SCALE_STEP) + 1;
-const MAX_FRAME_DIFF_PIXELS = 80;
-const MAX_CUT_ORNAMENT_PIXELS = 24;
-const MASK_STEPS = 720;
+const MAX_PROFILE_EDGE_DIFF_PIXELS = 42;
+const MASK_STEPS = 360;
 const IMAGE_OVERDRAW_RATIO = 1.12;
+const PROFILE_INSET_PX = 12;
 
 // Exported for compatibility with debug/tools.
 const CY_SHIFT_RATIO = 0;
@@ -173,11 +173,88 @@ function _innerRadiusAtAngle(radius, theta, scale = 1) {
   return radius * ratio;
 }
 
-function _traceMaskPath(ctx, cx, cy, radius, scale = 1) {
+function _sampleLuma(data, w, h, x, y) {
+  const ix = Math.round(x);
+  const iy = Math.round(y);
+  if (ix < 0 || iy < 0 || ix >= w || iy >= h) return 0;
+  const idx = (iy * w + ix) * 4;
+  const r = data[idx];
+  const g = data[idx + 1];
+  const b = data[idx + 2];
+  return r * 0.299 + g * 0.587 + b * 0.114;
+}
+
+function _buildEdgeGuidedProfile(coverCtx, W, H, cx, cy, radius) {
+  const pad = Math.round(radius * 1.05);
+  const x0 = Math.max(0, Math.floor(cx - pad));
+  const y0 = Math.max(0, Math.floor(cy - pad));
+  const x1 = Math.min(W, Math.ceil(cx + pad));
+  const y1 = Math.min(H, Math.ceil(cy + pad));
+  const w = Math.max(1, x1 - x0);
+  const h = Math.max(1, y1 - y0);
+  const img = coverCtx.getImageData(x0, y0, w, h).data;
+
+  const profile = new Float32Array(MASK_STEPS + 1);
+  let gradTotal = 0;
+
+  for (let i = 0; i <= MASK_STEPS; i++) {
+    const theta = (i / MASK_STEPS) * Math.PI * 2;
+    const cosT = Math.cos(theta);
+    const sinT = Math.sin(theta);
+    const expected = _innerRadiusAtAngle(radius, theta, 1);
+    const rMin = Math.max(radius * 0.45, expected - 80);
+    const rMax = Math.min(radius * 0.97, expected + 80);
+
+    let bestR = expected;
+    let bestScore = -Infinity;
+    let bestGrad = 0;
+
+    for (let r = rMin + 2; r <= rMax - 2; r += 2) {
+      const xA = cx + cosT * (r - 2) - x0;
+      const yA = cy + sinT * (r - 2) - y0;
+      const xB = cx + cosT * (r + 2) - x0;
+      const yB = cy + sinT * (r + 2) - y0;
+      const grad = Math.abs(_sampleLuma(img, w, h, xB, yB) - _sampleLuma(img, w, h, xA, yA));
+      const score = grad - Math.abs(r - expected) * 0.08;
+
+      if (score > bestScore) {
+        bestScore = score;
+        bestR = r;
+        bestGrad = grad;
+      }
+    }
+
+    gradTotal += bestGrad;
+    profile[i] = Math.max(radius * 0.55, bestR - PROFILE_INSET_PX);
+  }
+
+  // Circular smooth (9-point moving average) to remove noisy spikes.
+  const smooth = new Float32Array(MASK_STEPS + 1);
+  for (let i = 0; i <= MASK_STEPS; i++) {
+    let sum = 0;
+    let n = 0;
+    for (let k = -4; k <= 4; k++) {
+      let j = i + k;
+      if (j < 0) j += MASK_STEPS;
+      if (j > MASK_STEPS) j -= MASK_STEPS;
+      sum += profile[j];
+      n++;
+    }
+    smooth[i] = sum / n;
+  }
+
+  return {
+    profile: smooth,
+    confidence: gradTotal / (MASK_STEPS + 1),
+  };
+}
+
+function _traceMaskPath(ctx, cx, cy, radius, scale = 1, profile = null) {
   ctx.beginPath();
   for (let i = 0; i <= MASK_STEPS; i++) {
     const theta = (i / MASK_STEPS) * Math.PI * 2;
-    const r = _innerRadiusAtAngle(radius, theta, scale);
+    const baseR = profile ? profile[i] : _innerRadiusAtAngle(radius, theta, 1);
+    const r = Math.max(radius * 0.52, baseR * scale);
     const x = cx + r * Math.cos(theta);
     const y = cy + r * Math.sin(theta);
     if (i === 0) ctx.moveTo(x, y);
@@ -186,14 +263,15 @@ function _traceMaskPath(ctx, cx, cy, radius, scale = 1) {
   ctx.closePath();
 }
 
-function _maskBounds(cx, cy, radius, scale = 1) {
+function _maskBounds(cx, cy, radius, scale = 1, profile = null) {
   let minX = Infinity;
   let minY = Infinity;
   let maxX = -Infinity;
   let maxY = -Infinity;
   for (let i = 0; i <= MASK_STEPS; i++) {
     const theta = (i / MASK_STEPS) * Math.PI * 2;
-    const r = _innerRadiusAtAngle(radius, theta, scale);
+    const baseR = profile ? profile[i] : _innerRadiusAtAngle(radius, theta, 1);
+    const r = Math.max(radius * 0.52, baseR * scale);
     const x = cx + r * Math.cos(theta);
     const y = cy + r * Math.sin(theta);
     minX = Math.min(minX, x);
@@ -204,7 +282,7 @@ function _maskBounds(cx, cy, radius, scale = 1) {
   return { minX, minY, maxX, maxY };
 }
 
-function _buildOverlayCanvas(coverImg, W, H, cx, cy, radius, scale = 1) {
+function _buildOverlayCanvas(coverImg, W, H, cx, cy, radius, scale = 1, profile = null) {
   const overlay = document.createElement('canvas');
   overlay.width = W;
   overlay.height = H;
@@ -213,14 +291,14 @@ function _buildOverlayCanvas(coverImg, W, H, cx, cy, radius, scale = 1) {
 
   octx.globalCompositeOperation = 'destination-out';
   octx.fillStyle = 'rgba(0,0,0,1)';
-  _traceMaskPath(octx, cx, cy, radius, scale);
+  _traceMaskPath(octx, cx, cy, radius, scale, profile);
   octx.fill();
 
   // Soften only the cut edge very slightly to avoid jagged seams.
   octx.globalAlpha = 0.25;
   octx.lineWidth = 3;
   octx.strokeStyle = 'rgba(0,0,0,1)';
-  _traceMaskPath(octx, cx, cy, radius, scale);
+  _traceMaskPath(octx, cx, cy, radius, scale, profile);
   octx.stroke();
   octx.globalAlpha = 1;
   octx.globalCompositeOperation = 'source-over';
@@ -228,67 +306,34 @@ function _buildOverlayCanvas(coverImg, W, H, cx, cy, radius, scale = 1) {
   return overlay;
 }
 
-function _measureFrameDiffPixels(ctx, coverCtx, cx, cy, radius, W, H) {
-  const pad = Math.round(radius * 0.28);
-  const { x0, y0, w, h } = _getRegionBounds(W, H, cx, cy, radius, pad);
+function _measureProfileEdgeDiffPixels(ctx, coverCtx, cx, cy, profile, scale, W, H) {
+  const pad = Math.round(Math.max(40, Math.min(260, (Math.max(...profile) || 400) * 0.15)));
+  const outer = Math.max(...profile) * scale + 26;
+  const { x0, y0, w, h } = _getRegionBounds(W, H, cx, cy, outer, pad);
   if (!w || !h) return 0;
 
   const comp = ctx.getImageData(x0, y0, w, h).data;
   const cov = coverCtx.getImageData(x0, y0, w, h).data;
-  let diffPixels = 0;
+  let diff = 0;
 
-  for (let py = 0; py < h; py++) {
-    const y = y0 + py;
-    for (let px = 0; px < w; px++) {
-      const x = x0 + px;
-      const idx = (py * w + px) * 4;
-      const dx = x - cx;
-      const dy = y - cy;
-      const d = Math.hypot(dx, dy);
-      if (d < radius * 0.58 || d > radius * 1.2) continue;
-
-      const r = cov[idx];
-      const g = cov[idx + 1];
-      const b = cov[idx + 2];
-      if (!_isOrnamentPixel(r, g, b)) continue;
-
-      const dr = Math.abs(comp[idx] - r);
-      const dg = Math.abs(comp[idx + 1] - g);
-      const db = Math.abs(comp[idx + 2] - b);
-      if (dr + dg + db > 24) diffPixels++;
+  // Sample just outside the boundary where frame pixels should be unchanged.
+  for (let i = 0; i < MASK_STEPS; i += 2) {
+    const theta = (i / MASK_STEPS) * Math.PI * 2;
+    const r0 = profile[i] * scale;
+    for (const offset of [8, 12, 16]) {
+      const x = Math.round(cx + (r0 + offset) * Math.cos(theta));
+      const y = Math.round(cy + (r0 + offset) * Math.sin(theta));
+      const lx = x - x0;
+      const ly = y - y0;
+      if (lx < 0 || ly < 0 || lx >= w || ly >= h) continue;
+      const idx = (ly * w + lx) * 4;
+      const dr = Math.abs(comp[idx] - cov[idx]);
+      const dg = Math.abs(comp[idx + 1] - cov[idx + 1]);
+      const db = Math.abs(comp[idx + 2] - cov[idx + 2]);
+      if (dr + dg + db > 28) diff++;
     }
   }
-
-  return diffPixels;
-}
-
-function _countOrnamentsCutByMask(overlayCtx, coverCtx, cx, cy, radius, W, H) {
-  const pad = Math.round(radius * 0.28);
-  const { x0, y0, w, h } = _getRegionBounds(W, H, cx, cy, radius, pad);
-  if (!w || !h) return 0;
-
-  const over = overlayCtx.getImageData(x0, y0, w, h).data;
-  const cov = coverCtx.getImageData(x0, y0, w, h).data;
-  let cut = 0;
-
-  for (let py = 0; py < h; py++) {
-    const y = y0 + py;
-    for (let px = 0; px < w; px++) {
-      const x = x0 + px;
-      const idx = (py * w + px) * 4;
-      const d = Math.hypot(x - cx, y - cy);
-      if (d < radius * 0.52 || d > radius * 1.05) continue;
-
-      if (over[idx + 3] > 8) continue; // not transparent => not cut from overlay
-
-      const r = cov[idx];
-      const g = cov[idx + 1];
-      const b = cov[idx + 2];
-      if (_isOrnamentPixel(r, g, b)) cut++;
-    }
-  }
-
-  return cut;
+  return diff;
 }
 
 // ---------------------------------------------------------------------------
@@ -303,11 +348,16 @@ function smartComposite(coverImg, generatedImg, cx = 2850, cy = 1350, radius = 5
   const cropCenterY = Math.max(0.15, Math.min(0.85, detailCenter.y));
 
   const { coverCtx } = _drawCoverToCanvas(coverImg, W, H);
+  const edgeGuided = _buildEdgeGuidedProfile(coverCtx, W, H, cx, cy, radius);
+  const profile = edgeGuided.profile;
+
   let fallbackCanvas = null;
+  let bestCanvas = null;
+  let bestEdgeDiff = Infinity;
 
   for (let attempt = 0; attempt < MAX_COMPOSE_ATTEMPTS; attempt++) {
     const scale = Math.max(MASK_SCALE_MIN, MASK_SCALE_START - attempt * MASK_SCALE_STEP);
-    const mask = _maskBounds(cx, cy, radius, scale);
+    const mask = _maskBounds(cx, cy, radius, scale, profile);
     const maskW = Math.max(100, Math.round(mask.maxX - mask.minX));
     const maskH = Math.max(100, Math.round(mask.maxY - mask.minY));
     const drawW = Math.round(maskW * IMAGE_OVERDRAW_RATIO);
@@ -343,25 +393,27 @@ function smartComposite(coverImg, generatedImg, cx = 2850, cy = 1350, radius = 5
     );
 
     // Layer 2: source cover overlay with transparent medallion opening.
-    const overlayCanvas = _buildOverlayCanvas(coverImg, W, H, cx, cy, radius, scale);
+    const overlayCanvas = _buildOverlayCanvas(coverImg, W, H, cx, cy, radius, scale, profile);
     ctx.drawImage(overlayCanvas, 0, 0);
 
-    const overlayCtx = overlayCanvas.getContext('2d');
-    const frameDiff = _measureFrameDiffPixels(ctx, coverCtx, cx, cy, radius, W, H);
-    const cutOrnaments = _countOrnamentsCutByMask(overlayCtx, coverCtx, cx, cy, radius, W, H);
+    const edgeDiff = _measureProfileEdgeDiffPixels(ctx, coverCtx, cx, cy, profile, scale, W, H);
 
     console.log(
-      `[Compositor v8 overlay] attempt=${attempt + 1}/${MAX_COMPOSE_ATTEMPTS} scale=${scale.toFixed(2)} ` +
-      `draw=(${drawW}x${drawH}) frameDiff=${frameDiff} cutOrnaments=${cutOrnaments}`
+      `[Compositor v9 edge-mask] attempt=${attempt + 1}/${MAX_COMPOSE_ATTEMPTS} scale=${scale.toFixed(2)} ` +
+      `draw=(${drawW}x${drawH}) edgeDiff=${edgeDiff} edgeConfidence=${edgeGuided.confidence.toFixed(2)}`
     );
 
     fallbackCanvas = canvas;
-    if (frameDiff <= MAX_FRAME_DIFF_PIXELS && cutOrnaments <= MAX_CUT_ORNAMENT_PIXELS) {
+    if (edgeDiff < bestEdgeDiff) {
+      bestEdgeDiff = edgeDiff;
+      bestCanvas = canvas;
+    }
+    if (edgeDiff <= MAX_PROFILE_EDGE_DIFF_PIXELS) {
       return canvas;
     }
   }
 
-  return fallbackCanvas;
+  return bestCanvas || fallbackCanvas;
 }
 
 // Create a thumbnail of a canvas
