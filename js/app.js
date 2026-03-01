@@ -276,10 +276,27 @@ window.JobQueue = {
         );
         coverImg = cached.img;
         coverReferenceImg = cached.baseImg || cached.img;
+        // Guardrail: only accept auto-detected medallion geometry when it is
+        // very close to configured defaults. Wild detections caused tiny/off-
+        // center inserts on some covers.
         if (cached.medallion.detected) {
-          medCx = cached.medallion.cx;
-          medCy = cached.medallion.cy;
-          medRadius = cached.medallion.radius;
+          const detected = cached.medallion;
+          const closeToDefaults =
+            Math.abs((detected.cx || 0) - medCx) <= 80 &&
+            Math.abs((detected.cy || 0) - medCy) <= 80 &&
+            Math.abs((detected.radius || 0) - medRadius) <= 120;
+
+          if (closeToDefaults) {
+            medCx = detected.cx;
+            medCy = detected.cy;
+            medRadius = detected.radius;
+          } else {
+            console.warn(
+              `Ignoring outlier medallion detection for ${book.id}: ` +
+              `detected=(${detected.cx},${detected.cy},r${detected.radius}) ` +
+              `defaults=(${medCx},${medCy},r${medRadius})`
+            );
+          }
         }
         const hasOverlay = !!book.cover_overlay_png_id;
         this._setSubStatus(job, `Cover loaded (${coverImg.width}\u00d7${coverImg.height})${hasOverlay ? ' + overlay template' : ''}`);
