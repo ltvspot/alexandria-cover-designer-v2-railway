@@ -13,6 +13,10 @@
 const CY_SHIFT_RATIO = 0.20;
 const RX_RATIO = 0.46;
 const RY_RATIO = 0.69;
+const SAFE_MIN_SHRINK = 0.82;
+const SHRINK_STEP = 0.05;
+const MAX_COMPOSE_ATTEMPTS = 5;
+const MAX_RING_DIFF_PIXELS = 160;
 
 // Kept for backward compatibility with existing debug/tools exports.
 const FILL_RATIO = 1.0;
@@ -125,6 +129,108 @@ function _restoreCoverOutsideEllipse(ctx, coverImg, W, H, cx, cy, rx, ry) {
   ctx.drawImage(outsideCanvas, 0, 0);
 }
 
+function _isOrnamentPixel(r, g, b) {
+  const strongGold = r > 145 && g > 105 && b < 135 && r > g && g > b;
+  const warmIvory = r > 170 && g > 145 && b > 100 && (r - g) < 65 && (g - b) < 60;
+  return strongGold || warmIvory;
+}
+
+function _getRegionBounds(W, H, cx, cy, rx, ry, padX, padY) {
+  const x0 = Math.max(0, Math.floor(cx - rx - padX));
+  const y0 = Math.max(0, Math.floor(cy - ry - padY));
+  const x1 = Math.min(W, Math.ceil(cx + rx + padX));
+  const y1 = Math.min(H, Math.ceil(cy + ry + padY));
+  return { x0, y0, w: Math.max(0, x1 - x0), h: Math.max(0, y1 - y0) };
+}
+
+function _drawCoverToCanvas(coverImg, W, H) {
+  const coverCanvas = document.createElement('canvas');
+  coverCanvas.width = W;
+  coverCanvas.height = H;
+  const coverCtx = coverCanvas.getContext('2d');
+  coverCtx.drawImage(coverImg, 0, 0, W, H);
+  return { coverCanvas, coverCtx };
+}
+
+function _protectOrnamentPixels(ctx, coverCtx, cx, cy, rx, ry, W, H) {
+  const padX = Math.round(rx * 0.7);
+  const padY = Math.round(ry * 0.7);
+  const { x0, y0, w, h } = _getRegionBounds(W, H, cx, cy, rx, ry, padX, padY);
+  if (!w || !h) return 0;
+
+  const comp = ctx.getImageData(x0, y0, w, h);
+  const cov = coverCtx.getImageData(x0, y0, w, h);
+  const cd = comp.data;
+  const od = cov.data;
+  let restored = 0;
+
+  for (let py = 0; py < h; py++) {
+    const y = y0 + py;
+    for (let px = 0; px < w; px++) {
+      const x = x0 + px;
+      const idx = (py * w + px) * 4;
+      const nx = (x - cx) / rx;
+      const ny = (y - cy) / ry;
+      const d2 = nx * nx + ny * ny;
+
+      // Only guard ring/ornament zones near the oval edge.
+      if (d2 < 0.72 || d2 > 2.0) continue;
+
+      const r = od[idx];
+      const g = od[idx + 1];
+      const b = od[idx + 2];
+      if (!_isOrnamentPixel(r, g, b)) continue;
+
+      if (cd[idx] !== r || cd[idx + 1] !== g || cd[idx + 2] !== b || cd[idx + 3] !== od[idx + 3]) {
+        cd[idx] = r;
+        cd[idx + 1] = g;
+        cd[idx + 2] = b;
+        cd[idx + 3] = od[idx + 3];
+        restored++;
+      }
+    }
+  }
+
+  ctx.putImageData(comp, x0, y0);
+  return restored;
+}
+
+function _measureRingDiffPixels(ctx, coverCtx, cx, cy, rx, ry, W, H) {
+  const padX = Math.round(rx * 0.7);
+  const padY = Math.round(ry * 0.7);
+  const { x0, y0, w, h } = _getRegionBounds(W, H, cx, cy, rx, ry, padX, padY);
+  if (!w || !h) return 0;
+
+  const comp = ctx.getImageData(x0, y0, w, h).data;
+  const cov = coverCtx.getImageData(x0, y0, w, h).data;
+  let diffPixels = 0;
+
+  for (let py = 0; py < h; py++) {
+    const y = y0 + py;
+    for (let px = 0; px < w; px++) {
+      const x = x0 + px;
+      const idx = (py * w + px) * 4;
+      const nx = (x - cx) / rx;
+      const ny = (y - cy) / ry;
+      const d2 = nx * nx + ny * ny;
+
+      if (d2 < 0.72 || d2 > 2.0) continue;
+
+      const r = cov[idx];
+      const g = cov[idx + 1];
+      const b = cov[idx + 2];
+      if (!_isOrnamentPixel(r, g, b)) continue;
+
+      const dr = Math.abs(comp[idx] - r);
+      const dg = Math.abs(comp[idx + 1] - g);
+      const db = Math.abs(comp[idx + 2] - b);
+      if (dr + dg + db > 24) diffPixels++;
+    }
+  }
+
+  return diffPixels;
+}
+
 // ---------------------------------------------------------------------------
 // smartComposite — hard inner-oval replacement with ornament protection
 // ---------------------------------------------------------------------------
@@ -133,57 +239,76 @@ function smartComposite(coverImg, generatedImg, cx = 2850, cy = 1350, radius = 5
   const H = coverImg.height || 2777;
 
   const innerCy = cy + Math.round(radius * CY_SHIFT_RATIO);
-  const rx = Math.round(radius * RX_RATIO);
-  const ry = Math.round(radius * RY_RATIO);
+  const baseRx = Math.round(radius * RX_RATIO);
+  const baseRy = Math.round(radius * RY_RATIO);
 
   const detailCenter = findBestCropCenter(generatedImg);
   const cropCenterX = Math.max(0.15, Math.min(0.85, detailCenter.x));
   const cropCenterY = Math.max(0.15, Math.min(0.85, detailCenter.y));
 
-  console.log(
-    `[Compositor v6] detected=(${cx},${cy},r=${radius}) inner=(${cx},${innerCy}) rx=${rx} ry=${ry}`
-  );
+  const { coverCtx } = _drawCoverToCanvas(coverImg, W, H);
+  let fallbackCanvas = null;
 
-  const canvas = document.createElement('canvas');
-  canvas.width = W;
-  canvas.height = H;
-  const ctx = canvas.getContext('2d');
+  for (let attempt = 0; attempt < MAX_COMPOSE_ATTEMPTS; attempt++) {
+    const scale = Math.max(SAFE_MIN_SHRINK, 1 - attempt * SHRINK_STEP);
+    const rx = Math.max(120, Math.round(baseRx * scale));
+    const ry = Math.max(180, Math.round(baseRy * scale));
 
-  // Layer 1: original cover untouched.
-  ctx.drawImage(coverImg, 0, 0, W, H);
+    const canvas = document.createElement('canvas');
+    canvas.width = W;
+    canvas.height = H;
+    const ctx = canvas.getContext('2d');
 
-  // Layer 2: generated art clipped to inner oval only.
-  const destAspect = rx / ry;
-  const { srcX, srcY, srcW, srcH } = _fitSourceRectToDestAspect(
-    generatedImg.width,
-    generatedImg.height,
-    destAspect,
-    cropCenterX,
-    cropCenterY
-  );
+    // Layer 1: original cover untouched.
+    ctx.drawImage(coverImg, 0, 0, W, H);
 
-  ctx.save();
-  ctx.beginPath();
-  ctx.ellipse(cx, innerCy, rx, ry, 0, 0, Math.PI * 2);
-  ctx.closePath();
-  ctx.clip();
-  ctx.drawImage(
-    generatedImg,
-    srcX,
-    srcY,
-    srcW,
-    srcH,
-    cx - rx,
-    innerCy - ry,
-    rx * 2,
-    ry * 2
-  );
-  ctx.restore();
+    // Layer 2: generated art clipped to inner oval only.
+    const destAspect = rx / ry;
+    const { srcX, srcY, srcW, srcH } = _fitSourceRectToDestAspect(
+      generatedImg.width,
+      generatedImg.height,
+      destAspect,
+      cropCenterX,
+      cropCenterY
+    );
 
-  // Layer 3: hard safety pass — restore everything outside oval from cover.
-  _restoreCoverOutsideEllipse(ctx, coverImg, W, H, cx, innerCy, rx, ry);
+    ctx.save();
+    ctx.beginPath();
+    ctx.ellipse(cx, innerCy, rx, ry, 0, 0, Math.PI * 2);
+    ctx.closePath();
+    ctx.clip();
+    ctx.drawImage(
+      generatedImg,
+      srcX,
+      srcY,
+      srcW,
+      srcH,
+      cx - rx,
+      innerCy - ry,
+      rx * 2,
+      ry * 2
+    );
+    ctx.restore();
 
-  return canvas;
+    // Layer 3: hard safety pass — restore everything outside oval from cover.
+    _restoreCoverOutsideEllipse(ctx, coverImg, W, H, cx, innerCy, rx, ry);
+
+    // Layer 4: restore ornament/ring pixels from the original cover.
+    const restored = _protectOrnamentPixels(ctx, coverCtx, cx, innerCy, rx, ry, W, H);
+    const ringDiff = _measureRingDiffPixels(ctx, coverCtx, cx, innerCy, rx, ry, W, H);
+
+    console.log(
+      `[Compositor v7] attempt=${attempt + 1}/${MAX_COMPOSE_ATTEMPTS} scale=${scale.toFixed(2)} ` +
+      `inner=(${cx},${innerCy}) rx=${rx} ry=${ry} restored=${restored} ringDiff=${ringDiff}`
+    );
+
+    fallbackCanvas = canvas;
+    if (ringDiff <= MAX_RING_DIFF_PIXELS) {
+      return canvas;
+    }
+  }
+
+  return fallbackCanvas;
 }
 
 // Create a thumbnail of a canvas
