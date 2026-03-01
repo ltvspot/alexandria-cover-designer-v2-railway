@@ -10,10 +10,10 @@
 // This aligns with the "adjust source files / transparent template" approach
 // from the MEDALLION-FIX report and avoids fragile runtime boundary detection.
 
-const INNER_RADIUS_BASE_RATIO = 350 / 520;
-const INNER_RADIUS_MIN_RATIO = 0.60;
-const INNER_RADIUS_MAX_RATIO = 0.74;
-const INNER_RADIUS_SCALE_STEPS = [1.03, 1.01, 1.0, 0.98, 0.96];
+const INNER_RADIUS_BASE_RATIO = 420 / 520;
+const INNER_RADIUS_MIN_RATIO = 0.74;
+const INNER_RADIUS_MAX_RATIO = 0.92;
+const INNER_RADIUS_SCALE_STEPS = [1.0, 0.98, 0.96, 0.94];
 const INNER_FEATHER_PX = 8;
 
 const MAX_OUTER_EDGE_DIFF_PIXELS = 36;
