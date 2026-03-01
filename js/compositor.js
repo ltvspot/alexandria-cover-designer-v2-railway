@@ -93,6 +93,33 @@ function findBestCropCenter(imageElement) {
   return { x: (wx / totalW) / size, y: (wy / totalW) / size };
 }
 
+function _estimateFallbackFillColor(imageElement) {
+  const size = 40;
+  const canvas = document.createElement('canvas');
+  canvas.width = size;
+  canvas.height = size;
+  const ctx = canvas.getContext('2d', { willReadFrequently: true });
+  ctx.drawImage(imageElement, 0, 0, size, size);
+  const data = ctx.getImageData(0, 0, size, size).data;
+
+  let rSum = 0;
+  let gSum = 0;
+  let bSum = 0;
+  let n = 0;
+
+  for (let i = 0; i < data.length; i += 4) {
+    const a = data[i + 3];
+    if (a < 20) continue;
+    rSum += data[i];
+    gSum += data[i + 1];
+    bSum += data[i + 2];
+    n++;
+  }
+
+  if (!n) return 'rgb(30,30,30)';
+  return `rgb(${Math.round(rSum / n)}, ${Math.round(gSum / n)}, ${Math.round(bSum / n)})`;
+}
+
 // ---------------------------------------------------------------------------
 // compositeOnCover — backward compat wrapper
 // ---------------------------------------------------------------------------
@@ -268,6 +295,7 @@ function smartComposite(coverImg, generatedImg, cx = 2850, cy = 1350, radius = 5
   const detailCenter = findBestCropCenter(generatedImg);
   const cropCenterX = Math.max(0.15, Math.min(0.85, detailCenter.x));
   const cropCenterY = Math.max(0.15, Math.min(0.85, detailCenter.y));
+  const fallbackFillColor = _estimateFallbackFillColor(generatedImg);
 
   const { coverCtx } = _drawCoverToCanvas(coverImg, W, H);
   const base = _estimateInnerCircleRadius(coverCtx, W, H, cx, cy, radius);
@@ -299,7 +327,15 @@ function smartComposite(coverImg, generatedImg, cx = 2850, cy = 1350, radius = 5
       cropCenterY
     );
 
-    // Layer 1: generated illustration base.
+    // Layer 1: base fill + generated illustration.
+    // Some providers return transparent edges; this prevents old cover pixels
+    // from showing through inside the medallion opening.
+    ctx.fillStyle = fallbackFillColor;
+    ctx.beginPath();
+    ctx.arc(cx, cy, Math.round(maskRadius * 1.04), 0, Math.PI * 2);
+    ctx.closePath();
+    ctx.fill();
+
     ctx.drawImage(generatedImg, srcX, srcY, srcW, srcH, drawX, drawY, drawW, drawH);
 
     // Layer 2: original cover overlay with transparent opening.
