@@ -1,45 +1,26 @@
-// compositor.js — Canvas-based compositing with frame-preserving approach
+// compositor.js — Canvas-based compositing with hard inner-oval clipping
 //
-// ARCHITECTURE (v5 — Frame-preserving elliptical punch):
-//   The medallion ornamental frame (scrollwork, beaded ring) must REMAIN INTACT.
-//   Only the artwork INSIDE the frame opening is replaced.
+// ARCHITECTURE (v6 — ornament-safe inner oval):
+//   1) Draw original cover unchanged.
+//   2) Draw generated illustration ONLY inside a conservative inner oval clip.
+//   3) Repaint cover outside that oval to guarantee no bleed into ornament/frame zones.
 //
-//   The frame opening is NOT a perfect circle — it extends further at the bottom
-//   (pendant scrollwork) than at the top (floral crown dips inward). An elliptical
-//   punch with a downward-shifted center matches the opening shape.
-//
-//   Layers (bottom to top):
-//   1. AI illustration clipped to a large circle (covers entire medallion zone)
-//   2. Gold beveled ring at the ellipse edge (smooth transition)
-//   3. Original cover with elliptical hole punched out
-//      → Frame, scrollwork, background, text all preserved from original
-//      → Only the elliptical opening shows the illustration
-//
-//   The illustration fills BEYOND the punch (hidden by cover overlay), ensuring
-//   no old artwork bleeds through. The cover overlay guarantees all frame elements
-//   are pixel-perfect from the original.
+// This intentionally prioritizes frame integrity over maximal fill. The decorative
+// ring and scrollwork stay intact even when generation/crop varies.
 
-// --- Configuration ratios (relative to detected outer radius) ---
+// Ratios are relative to detected OUTER medallion radius.
+// Tuned conservatively from sampled source covers to avoid ornament overlap.
+const CY_SHIFT_RATIO = 0.20;
+const RX_RATIO = 0.46;
+const RY_RATIO = 0.69;
 
-// Shift the ellipse center downward from the detected medallion center.
-// The frame opening extends much further below than above.
-const CY_SHIFT_RATIO = 0.327;   // 170px for r=520
-
-// Ellipse horizontal radius (limited by side scrollwork)
-const RX_RATIO = 0.904;         // 470px for r=520
-
-// Ellipse vertical radius (must reach the bottom pendant opening)
-const RY_RATIO = 1.144;         // 595px for r=520
-
-// Illustration fill radius — large enough to cover everything
-const FILL_RATIO = 1.35;        // ~700px for r=520
-
-// Gold ring width at illustration edge
-const RING_WIDTH = 18;
+// Kept for backward compatibility with existing debug/tools exports.
+const FILL_RATIO = 1.0;
+const RING_WIDTH = 0;
 
 // ---------------------------------------------------------------------------
 // findBestCropCenter — energy-based detail center detection
-// Returns {x, y} in 0-1 normalised coords
+// Returns {x, y} in 0-1 normalized coords
 // ---------------------------------------------------------------------------
 function findBestCropCenter(imageElement) {
   const size = 150;
@@ -53,9 +34,9 @@ function findBestCropCenter(imageElement) {
   const energy = new Float32Array(size * size);
   for (let y = 1; y < size - 1; y++) {
     for (let x = 1; x < size - 1; x++) {
-      const idx   = (y * size + x) * 4;
+      const idx = (y * size + x) * 4;
       const right = (y * size + x + 1) * 4;
-      const down  = ((y + 1) * size + x) * 4;
+      const down = ((y + 1) * size + x) * 4;
       const gx = Math.abs(data[idx] - data[right]) +
                  Math.abs(data[idx + 1] - data[right + 1]) +
                  Math.abs(data[idx + 2] - data[right + 2]);
@@ -71,7 +52,8 @@ function findBestCropCenter(imageElement) {
   const kSum = 16;
   for (let y = 1; y < size - 1; y++) {
     for (let x = 1; x < size - 1; x++) {
-      let v = 0, ki = 0;
+      let v = 0;
+      let ki = 0;
       for (let dy = -1; dy <= 1; dy++) {
         for (let dx = -1; dx <= 1; dx++) {
           v += energy[(y + dy) * size + (x + dx)] * kernel[ki++];
@@ -81,7 +63,9 @@ function findBestCropCenter(imageElement) {
     }
   }
 
-  let totalW = 0, wx = 0, wy = 0;
+  let totalW = 0;
+  let wx = 0;
+  let wy = 0;
   for (let y = 0; y < size; y++) {
     for (let x = 0; x < size; x++) {
       const w = blurred[y * size + x];
@@ -98,152 +82,108 @@ function findBestCropCenter(imageElement) {
 // ---------------------------------------------------------------------------
 // compositeOnCover — backward compat wrapper
 // ---------------------------------------------------------------------------
-function compositeOnCover(coverImg, generatedImg, cx = 2850, cy = 1350, radius = 520, feather = 15) {
+function compositeOnCover(coverImg, generatedImg, cx = 2850, cy = 1350, radius = 520) {
   return smartComposite(coverImg, generatedImg, cx, cy, radius);
 }
 
-// ---------------------------------------------------------------------------
-// smartComposite — frame-preserving compositing pipeline
-// ---------------------------------------------------------------------------
-function smartComposite(coverImg, generatedImg, cx = 2850, cy = 1350, radius = 520) {
-  // Compute ellipse parameters from detected medallion
-  const cyShift = Math.round(radius * CY_SHIFT_RATIO);
-  const ellCy = cy + cyShift;
-  const rx = Math.round(radius * RX_RATIO);
-  const ry = Math.round(radius * RY_RATIO);
-  const fillRadius = Math.round(radius * FILL_RATIO);
+function _fitSourceRectToDestAspect(imgW, imgH, destAspect, cropCenterX, cropCenterY) {
+  const imgAspect = imgW / imgH;
+  let srcW;
+  let srcH;
 
-  console.log(`[Compositor v5] detected=(${cx},${cy},r=${radius}), ellipse_center=(${cx},${ellCy}), rx=${rx}, ry=${ry}, fill_r=${fillRadius}`);
+  if (imgAspect > destAspect) {
+    srcH = imgH;
+    srcW = Math.round(imgH * destAspect);
+  } else {
+    srcW = imgW;
+    srcH = Math.round(imgW / destAspect);
+  }
 
-  const detailCenter = findBestCropCenter(generatedImg);
-  const clampedX = Math.max(0.2, Math.min(0.8, detailCenter.x));
-  const clampedY = Math.max(0.2, Math.min(0.8, detailCenter.y));
+  let srcX = Math.round(cropCenterX * imgW - srcW / 2);
+  let srcY = Math.round(cropCenterY * imgH - srcH / 2);
 
-  return _framePreservingComposite(coverImg, generatedImg, cx, ellCy,
-    rx, ry, fillRadius, clampedX, clampedY);
+  srcX = Math.max(0, Math.min(imgW - srcW, srcX));
+  srcY = Math.max(0, Math.min(imgH - srcH, srcY));
+
+  return { srcX, srcY, srcW, srcH };
+}
+
+function _restoreCoverOutsideEllipse(ctx, coverImg, W, H, cx, cy, rx, ry) {
+  const outsideCanvas = document.createElement('canvas');
+  outsideCanvas.width = W;
+  outsideCanvas.height = H;
+  const octx = outsideCanvas.getContext('2d');
+
+  octx.drawImage(coverImg, 0, 0, W, H);
+  octx.globalCompositeOperation = 'destination-out';
+  octx.beginPath();
+  octx.ellipse(cx, cy, rx, ry, 0, 0, Math.PI * 2);
+  octx.closePath();
+  octx.fill();
+  octx.globalCompositeOperation = 'source-over';
+
+  ctx.drawImage(outsideCanvas, 0, 0);
 }
 
 // ---------------------------------------------------------------------------
-// _framePreservingComposite — guaranteed frame preservation
-//
-//   Layer 0: Illustration clipped to fillRadius circle (covers everything)
-//   Layer 1: Gold elliptical ring border at punch edge
-//   Layer 2: Original cover with elliptical punch removed
+// smartComposite — hard inner-oval replacement with ornament protection
 // ---------------------------------------------------------------------------
-function _framePreservingComposite(coverImg, generatedImg, cx, cy,
-  rx, ry, fillRadius, cropCenterX, cropCenterY) {
-
+function smartComposite(coverImg, generatedImg, cx = 2850, cy = 1350, radius = 520) {
   const W = coverImg.width || 3784;
   const H = coverImg.height || 2777;
+
+  const innerCy = cy + Math.round(radius * CY_SHIFT_RATIO);
+  const rx = Math.round(radius * RX_RATIO);
+  const ry = Math.round(radius * RY_RATIO);
+
+  const detailCenter = findBestCropCenter(generatedImg);
+  const cropCenterX = Math.max(0.15, Math.min(0.85, detailCenter.x));
+  const cropCenterY = Math.max(0.15, Math.min(0.85, detailCenter.y));
+
+  console.log(
+    `[Compositor v6] detected=(${cx},${cy},r=${radius}) inner=(${cx},${innerCy}) rx=${rx} ry=${ry}`
+  );
+
   const canvas = document.createElement('canvas');
   canvas.width = W;
   canvas.height = H;
   const ctx = canvas.getContext('2d');
 
-  // === LAYER 0: Illustration clipped to large fill circle ===
-  // This covers the entire medallion zone including frame ring area
-  const fillSize = fillRadius * 2;
-  const imgW = generatedImg.width;
-  const imgH = generatedImg.height;
+  // Layer 1: original cover untouched.
+  ctx.drawImage(coverImg, 0, 0, W, H);
 
-  // Aspect-fill square crop from generated image
-  let srcW, srcH;
-  if (imgW > imgH) { srcH = imgH; srcW = imgH; }
-  else { srcW = imgW; srcH = imgW; }
-
-  let srcX = Math.round(cropCenterX * imgW - srcW / 2);
-  let srcY = Math.round(cropCenterY * imgH - srcH / 2);
-  srcX = Math.max(0, Math.min(imgW - srcW, srcX));
-  srcY = Math.max(0, Math.min(imgH - srcH, srcY));
+  // Layer 2: generated art clipped to inner oval only.
+  const destAspect = rx / ry;
+  const { srcX, srcY, srcW, srcH } = _fitSourceRectToDestAspect(
+    generatedImg.width,
+    generatedImg.height,
+    destAspect,
+    cropCenterX,
+    cropCenterY
+  );
 
   ctx.save();
   ctx.beginPath();
-  ctx.arc(cx, cy, fillRadius, 0, Math.PI * 2);
+  ctx.ellipse(cx, innerCy, rx, ry, 0, 0, Math.PI * 2);
   ctx.closePath();
   ctx.clip();
-  ctx.drawImage(generatedImg,
-    srcX, srcY, srcW, srcH,
-    cx - fillRadius, cy - fillRadius, fillSize, fillSize
+  ctx.drawImage(
+    generatedImg,
+    srcX,
+    srcY,
+    srcW,
+    srcH,
+    cx - rx,
+    innerCy - ry,
+    rx * 2,
+    ry * 2
   );
   ctx.restore();
 
-  // === LAYER 1: Beveled gold ring border along ellipse edge ===
-  _drawGoldEllipseRing(ctx, cx, cy, rx, ry, RING_WIDTH);
-
-  // === LAYER 2: Cover with elliptical punch ===
-  const coverCanvas = document.createElement('canvas');
-  coverCanvas.width = W;
-  coverCanvas.height = H;
-  const cctx = coverCanvas.getContext('2d');
-  cctx.drawImage(coverImg, 0, 0, W, H);
-
-  // Punch out the elliptical opening
-  cctx.globalCompositeOperation = 'destination-out';
-  cctx.beginPath();
-  cctx.ellipse(cx, cy, rx, ry, 0, 0, Math.PI * 2);
-  cctx.closePath();
-  cctx.fill();
-  cctx.globalCompositeOperation = 'source-over';
-
-  // Composite punched cover on top
-  ctx.drawImage(coverCanvas, 0, 0);
+  // Layer 3: hard safety pass — restore everything outside oval from cover.
+  _restoreCoverOutsideEllipse(ctx, coverImg, W, H, cx, innerCy, rx, ry);
 
   return canvas;
-}
-
-// ---------------------------------------------------------------------------
-// _drawGoldEllipseRing — draw beveled gold ring along an ellipse
-// ---------------------------------------------------------------------------
-function _drawGoldEllipseRing(ctx, cx, cy, rx, ry, width) {
-  const halfW = width / 2;
-
-  for (let i = 0; i <= width; i++) {
-    const offset = i - halfW;
-    const t = i / width;
-
-    // Bevel profile
-    let brightness;
-    if (t < 0.15) {
-      brightness = 0.3 + t * 2.5;
-    } else if (t < 0.45) {
-      brightness = 0.7 + (t - 0.15) * 1.0;
-    } else if (t < 0.55) {
-      brightness = 1.0;
-    } else if (t < 0.85) {
-      brightness = 1.0 - (t - 0.55) * 1.0;
-    } else {
-      brightness = 0.7 - (t - 0.85) * 2.5;
-    }
-
-    const gr = Math.round(Math.min(255, 210 * brightness));
-    const gg = Math.round(Math.min(255, 170 * brightness));
-    const gb = Math.round(Math.min(255, 70 * brightness));
-
-    ctx.beginPath();
-    ctx.ellipse(cx, cy, rx + offset, ry + offset, 0, 0, Math.PI * 2);
-    ctx.strokeStyle = `rgb(${gr},${gg},${gb})`;
-    ctx.lineWidth = 1.5;
-    ctx.stroke();
-  }
-
-  // Add bead-like highlights along the ellipse perimeter
-  const numBeads = 72;
-  const beadRadius = Math.max(2, width * 0.25);
-  for (let i = 0; i < numBeads; i++) {
-    const angle = (2 * Math.PI * i) / numBeads;
-    const bx = cx + rx * Math.cos(angle);
-    const by = cy + ry * Math.sin(angle);
-
-    const grad = ctx.createRadialGradient(bx - 1, by - 1, 0, bx, by, beadRadius);
-    grad.addColorStop(0, 'rgba(255, 235, 160, 0.8)');
-    grad.addColorStop(0.5, 'rgba(210, 170, 70, 0.6)');
-    grad.addColorStop(1, 'rgba(150, 120, 40, 0)');
-
-    ctx.beginPath();
-    ctx.arc(bx, by, beadRadius, 0, Math.PI * 2);
-    ctx.fillStyle = grad;
-    ctx.fill();
-  }
 }
 
 // Create a thumbnail of a canvas
@@ -270,7 +210,15 @@ function canvasToDataUrl(canvas, type = 'image/jpeg', quality = 0.9) {
 }
 
 window.Compositor = {
-  compositeOnCover, smartComposite, findBestCropCenter,
-  createThumbnail, canvasToBlob, canvasToDataUrl,
-  RX_RATIO, RY_RATIO, CY_SHIFT_RATIO, FILL_RATIO, RING_WIDTH
+  compositeOnCover,
+  smartComposite,
+  findBestCropCenter,
+  createThumbnail,
+  canvasToBlob,
+  canvasToDataUrl,
+  RX_RATIO,
+  RY_RATIO,
+  CY_SHIFT_RATIO,
+  FILL_RATIO,
+  RING_WIDTH,
 };
