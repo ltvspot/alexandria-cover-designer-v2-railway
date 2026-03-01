@@ -1,33 +1,39 @@
-// compositor.js — Stable source-overlay compositing
+// compositor.js — source-profile overlay compositing
 //
-// ARCHITECTURE (v12 — fixed template opening):
-//   1) Draw generated illustration first (clipped to an inner medallion circle).
-//   2) Draw source cover on top with that inner circle cut transparent.
+// ARCHITECTURE (v14 — source-derived medallion profile):
+//   1) Draw generated illustration first (clipped to medallion opening profile).
+//   2) Draw source cover on top with that opening cut transparent.
 //      This guarantees the ornamental frame remains above generated art.
 //   3) If source art is already an RGBA overlay with transparent center,
 //      draw it directly as the top layer.
 //
-// This aligns with the "adjust source files / transparent template" approach
-// from the MEDALLION-FIX report and avoids fragile runtime boundary detection.
+// The opening profile is derived from real source covers to avoid the
+// "too small ellipse" and "ornament bleed" failure modes.
 
-const INNER_RX_BASE_RATIO = 0.88;
-const INNER_RY_BASE_RATIO = 0.96;
-const INNER_RX_MIN_RATIO = 0.78;
-const INNER_RX_MAX_RATIO = 0.94;
-const INNER_RY_MIN_RATIO = 0.84;
-const INNER_RY_MAX_RATIO = 0.99;
-const INNER_RADIUS_SCALE_STEPS = [1.0, 0.985, 0.97, 0.955];
+const MEDALLION_PROFILE_RATIOS = [
+  0.96586, 0.97110, 0.97910, 0.98807, 0.99559, 1.00094, 1.00465, 1.00589,
+  1.00258, 0.99508, 0.98731, 0.98252, 0.97960, 0.97542, 0.96941, 0.96432,
+  0.96273, 0.96424, 0.96571, 0.96391, 0.95853, 0.95301, 0.95145, 0.95450,
+  0.95977, 0.96600, 0.97459, 0.98635, 0.99854, 1.00659, 1.00770, 1.00192,
+  0.99110, 0.97808, 0.96627, 0.95833, 0.95477, 0.95459, 0.95712, 0.96202,
+  0.96753, 0.97045, 0.96908, 0.96506, 0.96117, 0.95815, 0.95470, 0.94965,
+  0.94320, 0.93665, 0.93162, 0.92935, 0.93007, 0.93267, 0.93530, 0.93672,
+  0.93758, 0.93999, 0.94552, 0.95319, 0.95964, 0.96157, 0.95843, 0.95293,
+  0.94859, 0.94697, 0.94757, 0.94964, 0.95297, 0.95693, 0.96036, 0.96291,
+];
+
+const PROFILE_MAX_RATIO = Math.max(...MEDALLION_PROFILE_RATIOS);
+const PROFILE_MEAN_RATIO = MEDALLION_PROFILE_RATIOS.reduce((s, v) => s + v, 0) / MEDALLION_PROFILE_RATIOS.length;
+
+const PROFILE_SCALE_STEPS = [1.0];
 const INNER_FEATHER_PX = 8;
-
-const MAX_OUTER_EDGE_DIFF_PIXELS = 36;
-const RING_SAMPLE_COUNT = 180;
 const IMAGE_OVERDRAW_RATIO = 1.12;
 
 // Exported for compatibility with debug/tools.
 const CY_SHIFT_RATIO = 0.01;
-const RX_RATIO = INNER_RX_BASE_RATIO;
-const RY_RATIO = INNER_RY_BASE_RATIO;
-const FILL_RATIO = 0.96;
+const RX_RATIO = 1;
+const RY_RATIO = 1;
+const FILL_RATIO = PROFILE_MEAN_RATIO;
 const RING_WIDTH = 0;
 
 // ---------------------------------------------------------------------------
@@ -147,52 +153,19 @@ function _fitSourceRectToDestAspect(imgW, imgH, destAspect, cropCenterX, cropCen
   return { srcX, srcY, srcW, srcH };
 }
 
-function _drawCoverToCanvas(coverImg, W, H) {
-  const coverCanvas = document.createElement('canvas');
-  coverCanvas.width = W;
-  coverCanvas.height = H;
-  const coverCtx = coverCanvas.getContext('2d');
-  coverCtx.drawImage(coverImg, 0, 0, W, H);
-  return { coverCanvas, coverCtx };
-}
-
-function _getRegionBounds(W, H, cx, cy, rx, ry, pad) {
-  const x0 = Math.max(0, Math.floor(cx - rx - pad));
-  const y0 = Math.max(0, Math.floor(cy - ry - pad));
-  const x1 = Math.min(W, Math.ceil(cx + rx + pad));
-  const y1 = Math.min(H, Math.ceil(cy + ry + pad));
-  return { x0, y0, w: Math.max(0, x1 - x0), h: Math.max(0, y1 - y0) };
-}
-
-function _getInnerRadii(outerRadius, scale = 1) {
-  const rxBase = outerRadius * INNER_RX_BASE_RATIO * scale;
-  const ryBase = outerRadius * INNER_RY_BASE_RATIO * scale;
-  const rx = Math.max(
-    outerRadius * INNER_RX_MIN_RATIO,
-    Math.min(outerRadius * INNER_RX_MAX_RATIO, rxBase)
-  );
-  const ry = Math.max(
-    outerRadius * INNER_RY_MIN_RATIO,
-    Math.min(outerRadius * INNER_RY_MAX_RATIO, ryBase)
-  );
-  return { rx, ry };
-}
-
-function _coverHasTransparentOpening(coverImg, W, H, cx, cy, rx, ry) {
+function _coverHasTransparentOpening(coverImg, W, H, cx, cy, probeRadius) {
   const probe = document.createElement('canvas');
   probe.width = W;
   probe.height = H;
   const pctx = probe.getContext('2d', { willReadFrequently: true });
   pctx.drawImage(coverImg, 0, 0, W, H);
 
-  const sx = rx * 0.14;
-  const sy = ry * 0.14;
   const samplePoints = [
     [cx, cy],
-    [cx + sx, cy],
-    [cx - sx, cy],
-    [cx, cy + sy],
-    [cx, cy - sy],
+    [cx + probeRadius, cy],
+    [cx - probeRadius, cy],
+    [cx, cy + probeRadius],
+    [cx, cy - probeRadius],
   ];
 
   for (const [x, y] of samplePoints) {
@@ -204,7 +177,23 @@ function _coverHasTransparentOpening(coverImg, W, H, cx, cy, rx, ry) {
   return false;
 }
 
-function _buildOverlayCanvas(coverImg, W, H, cx, cy, innerRx, innerRy, featherPx = INNER_FEATHER_PX) {
+function _traceMedallionPath(ctx, cx, cy, baseRadius, scale = 1, deltaPx = 0) {
+  const n = MEDALLION_PROFILE_RATIOS.length;
+  const effectiveBase = Math.max(1, baseRadius + deltaPx);
+
+  ctx.beginPath();
+  for (let i = 0; i < n; i++) {
+    const theta = (i / n) * Math.PI * 2;
+    const r = Math.max(1, effectiveBase * MEDALLION_PROFILE_RATIOS[i] * scale);
+    const x = cx + r * Math.cos(theta);
+    const y = cy + r * Math.sin(theta);
+    if (i === 0) ctx.moveTo(x, y);
+    else ctx.lineTo(x, y);
+  }
+  ctx.closePath();
+}
+
+function _buildOverlayCanvas(coverImg, W, H, cx, cy, baseRadius, scale = 1, featherPx = INNER_FEATHER_PX) {
   const overlay = document.createElement('canvas');
   overlay.width = W;
   overlay.height = H;
@@ -212,18 +201,14 @@ function _buildOverlayCanvas(coverImg, W, H, cx, cy, innerRx, innerRy, featherPx
   octx.drawImage(coverImg, 0, 0, W, H);
 
   octx.globalCompositeOperation = 'destination-out';
-  const hardRx = Math.max(0, innerRx - featherPx);
-  const hardRy = Math.max(0, innerRy - featherPx);
-  if (hardRx > 0 && hardRy > 0) {
-    octx.fillStyle = 'rgba(0,0,0,1)';
-    octx.beginPath();
-    octx.ellipse(cx, cy, hardRx, hardRy, 0, 0, Math.PI * 2);
-    octx.closePath();
-    octx.fill();
-  }
+
+  const hardDelta = Math.max(-baseRadius + 2, -featherPx);
+  _traceMedallionPath(octx, cx, cy, baseRadius, scale, hardDelta);
+  octx.fillStyle = 'rgba(0,0,0,1)';
+  octx.fill();
 
   if (featherPx > 0) {
-    const start = Math.max(0, -featherPx);
+    const start = -featherPx;
     const end = featherPx;
     const span = Math.max(1, end - start);
     octx.lineWidth = 2;
@@ -232,55 +217,13 @@ function _buildOverlayCanvas(coverImg, W, H, cx, cy, innerRx, innerRy, featherPx
       const t = (d - start) / span; // 0..1
       const alpha = Math.max(0, 1 - t);
       octx.strokeStyle = `rgba(0,0,0,${alpha.toFixed(3)})`;
-      octx.beginPath();
-      octx.ellipse(
-        cx,
-        cy,
-        Math.max(1, innerRx + d),
-        Math.max(1, innerRy + d),
-        0,
-        0,
-        Math.PI * 2
-      );
-      octx.closePath();
+      _traceMedallionPath(octx, cx, cy, baseRadius, scale, d);
       octx.stroke();
     }
   }
 
   octx.globalCompositeOperation = 'source-over';
   return overlay;
-}
-
-function _measureOuterEdgeDiffPixels(ctx, coverCtx, cx, cy, maskRx, maskRy, W, H) {
-  const pad = Math.round(Math.max(maskRx, maskRy) * 0.25);
-  const { x0, y0, w, h } = _getRegionBounds(W, H, cx, cy, maskRx, maskRy, pad);
-  if (!w || !h) return 0;
-
-  const comp = ctx.getImageData(x0, y0, w, h).data;
-  const cov = coverCtx.getImageData(x0, y0, w, h).data;
-  let diff = 0;
-
-  for (let i = 0; i < RING_SAMPLE_COUNT; i++) {
-    const theta = (i / RING_SAMPLE_COUNT) * Math.PI * 2;
-    const c = Math.cos(theta);
-    const s = Math.sin(theta);
-
-    for (const offset of [8, 12, 16]) {
-      const x = Math.round(cx + (maskRx + offset) * c);
-      const y = Math.round(cy + (maskRy + offset) * s);
-      const lx = x - x0;
-      const ly = y - y0;
-      if (lx < 0 || ly < 0 || lx >= w || ly >= h) continue;
-
-      const idx = (ly * w + lx) * 4;
-      const dr = Math.abs(comp[idx] - cov[idx]);
-      const dg = Math.abs(comp[idx + 1] - cov[idx + 1]);
-      const db = Math.abs(comp[idx + 2] - cov[idx + 2]);
-      if (dr + dg + db > 28) diff++;
-    }
-  }
-
-  return diff;
 }
 
 // ---------------------------------------------------------------------------
@@ -296,26 +239,23 @@ function smartComposite(coverImg, generatedImg, cx = 2850, cy = 1625, radius = 5
   const cropCenterY = Math.max(0.15, Math.min(0.85, detailCenter.y));
   const fallbackFillColor = _estimateFallbackFillColor(generatedImg);
 
-  const { coverCtx } = _drawCoverToCanvas(coverImg, W, H);
   const hasTransparentOpening = _coverHasTransparentOpening(
     coverImg,
     W,
     H,
     cx,
     innerCy,
-    radius * 0.25,
-    radius * 0.25
+    radius * 0.22
   );
 
   let fallbackCanvas = null;
-  let bestCanvas = null;
-  let bestEdgeDiff = Infinity;
 
-  for (let attempt = 0; attempt < INNER_RADIUS_SCALE_STEPS.length; attempt++) {
-    const scale = INNER_RADIUS_SCALE_STEPS[attempt];
-    const { rx: innerRx, ry: innerRy } = _getInnerRadii(radius, scale);
-    const drawW = Math.round((innerRx + INNER_FEATHER_PX) * 2 * IMAGE_OVERDRAW_RATIO);
-    const drawH = Math.round((innerRy + INNER_FEATHER_PX) * 2 * IMAGE_OVERDRAW_RATIO);
+  for (let attempt = 0; attempt < PROFILE_SCALE_STEPS.length; attempt++) {
+    const scale = PROFILE_SCALE_STEPS[attempt];
+    const maxProfileRadius = Math.max(1, (radius + INNER_FEATHER_PX) * PROFILE_MAX_RATIO * scale);
+
+    const drawW = Math.round(maxProfileRadius * 2 * IMAGE_OVERDRAW_RATIO);
+    const drawH = drawW;
     const drawX = Math.round(cx - drawW / 2);
     const drawY = Math.round(innerCy - drawH / 2);
 
@@ -337,15 +277,11 @@ function smartComposite(coverImg, generatedImg, cx = 2850, cy = 1625, radius = 5
     // Some providers return transparent edges; this prevents old cover pixels
     // from showing through inside the medallion opening.
     ctx.fillStyle = fallbackFillColor;
-    ctx.beginPath();
-    ctx.ellipse(cx, innerCy, innerRx + INNER_FEATHER_PX, innerRy + INNER_FEATHER_PX, 0, 0, Math.PI * 2);
-    ctx.closePath();
+    _traceMedallionPath(ctx, cx, innerCy, radius, scale, INNER_FEATHER_PX);
     ctx.fill();
 
     ctx.save();
-    ctx.beginPath();
-    ctx.ellipse(cx, innerCy, innerRx, innerRy, 0, 0, Math.PI * 2);
-    ctx.closePath();
+    _traceMedallionPath(ctx, cx, innerCy, radius, scale, 0);
     ctx.clip();
     ctx.drawImage(generatedImg, srcX, srcY, srcW, srcH, drawX, drawY, drawW, drawH);
     ctx.restore();
@@ -360,31 +296,24 @@ function smartComposite(coverImg, generatedImg, cx = 2850, cy = 1625, radius = 5
         H,
         cx,
         innerCy,
-        innerRx,
-        innerRy,
+        radius,
+        scale,
         INNER_FEATHER_PX
       );
       ctx.drawImage(overlayCanvas, 0, 0);
     }
 
-    const edgeDiff = _measureOuterEdgeDiffPixels(ctx, coverCtx, cx, innerCy, innerRx, innerRy, W, H);
-
     console.log(
-      `[Compositor v13 ellipse-template] attempt=${attempt + 1}/${INNER_RADIUS_SCALE_STEPS.length} ` +
-      `scale=${scale.toFixed(3)} inner=(${Math.round(innerRx)}x${Math.round(innerRy)}) draw=(${drawW}x${drawH}) edgeDiff=${edgeDiff} alphaOverlay=${hasTransparentOpening}`
+      `[Compositor v14 profile-template] attempt=${attempt + 1}/${PROFILE_SCALE_STEPS.length} ` +
+      `scale=${scale.toFixed(3)} profile=${MEDALLION_PROFILE_RATIOS.length} ` +
+      `draw=(${drawW}x${drawH}) alphaOverlay=${hasTransparentOpening}`
     );
 
     fallbackCanvas = canvas;
-    if (edgeDiff < bestEdgeDiff) {
-      bestEdgeDiff = edgeDiff;
-      bestCanvas = canvas;
-    }
-    if (edgeDiff <= MAX_OUTER_EDGE_DIFF_PIXELS) {
-      return canvas;
-    }
+    return canvas;
   }
 
-  return bestCanvas || fallbackCanvas;
+  return fallbackCanvas;
 }
 
 // Create a thumbnail of a canvas
