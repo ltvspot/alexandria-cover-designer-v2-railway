@@ -1,25 +1,36 @@
-// compositor.js — Canvas-based compositing with hard inner-oval clipping
+// compositor.js — Frame-overlay compositing with parametric inner-boundary mask
 //
-// ARCHITECTURE (v6 — ornament-safe inner oval):
-//   1) Draw original cover unchanged.
-//   2) Draw generated illustration ONLY inside a conservative inner oval clip.
-//   3) Repaint cover outside that oval to guarantee no bleed into ornament/frame zones.
+// ARCHITECTURE (v8 — source-overlay mask):
+//   1) Draw the generated illustration first (large fill region, smart-cropped).
+//   2) Draw an overlay derived from the source cover on top.
+//      The overlay is fully opaque except for a transparent medallion opening.
+//   3) Because the frame lives in the top layer, ornament bleed is physically blocked.
 //
-// This intentionally prioritizes frame integrity over maximal fill. The decorative
-// ring and scrollwork stay intact even when generation/crop varies.
+// This replaces the old inner-oval punch approach, which was too conservative and
+// could still mismatch the non-geometric baroque opening.
 
+// Approximate opening model from the report's parametric boundary.
 // Ratios are relative to detected OUTER medallion radius.
-// Tuned conservatively from sampled source covers to avoid ornament overlap.
-const CY_SHIFT_RATIO = 0.20;
-const RX_RATIO = 0.46;
-const RY_RATIO = 0.69;
-const SAFE_MIN_SHRINK = 0.82;
-const SHRINK_STEP = 0.05;
-const MAX_COMPOSE_ATTEMPTS = 5;
-const MAX_RING_DIFF_PIXELS = 160;
+const MASK_BASE_RATIO = 0.808;
+const MASK_TOP_INDENT_RATIO = 0.135;
+const MASK_BOTTOM_EXPAND_RATIO = 0.058;
+const MASK_SIDE_INDENT_RATIO = 0.029;
+const MASK_OVAL_BIAS_RATIO = 0.029;
 
-// Kept for backward compatibility with existing debug/tools exports.
-const FILL_RATIO = 1.0;
+const MASK_SCALE_START = 1.02;
+const MASK_SCALE_STEP = 0.02;
+const MASK_SCALE_MIN = 0.84;
+const MAX_COMPOSE_ATTEMPTS = Math.floor((MASK_SCALE_START - MASK_SCALE_MIN) / MASK_SCALE_STEP) + 1;
+const MAX_FRAME_DIFF_PIXELS = 80;
+const MAX_CUT_ORNAMENT_PIXELS = 24;
+const MASK_STEPS = 720;
+const IMAGE_OVERDRAW_RATIO = 1.12;
+
+// Exported for compatibility with debug/tools.
+const CY_SHIFT_RATIO = 0;
+const RX_RATIO = 0.78;
+const RY_RATIO = 0.78;
+const FILL_RATIO = 0.96;
 const RING_WIDTH = 0;
 
 // ---------------------------------------------------------------------------
@@ -112,34 +123,18 @@ function _fitSourceRectToDestAspect(imgW, imgH, destAspect, cropCenterX, cropCen
   return { srcX, srcY, srcW, srcH };
 }
 
-function _restoreCoverOutsideEllipse(ctx, coverImg, W, H, cx, cy, rx, ry) {
-  const outsideCanvas = document.createElement('canvas');
-  outsideCanvas.width = W;
-  outsideCanvas.height = H;
-  const octx = outsideCanvas.getContext('2d');
-
-  octx.drawImage(coverImg, 0, 0, W, H);
-  octx.globalCompositeOperation = 'destination-out';
-  octx.beginPath();
-  octx.ellipse(cx, cy, rx, ry, 0, 0, Math.PI * 2);
-  octx.closePath();
-  octx.fill();
-  octx.globalCompositeOperation = 'source-over';
-
-  ctx.drawImage(outsideCanvas, 0, 0);
-}
-
 function _isOrnamentPixel(r, g, b) {
-  const strongGold = r > 145 && g > 105 && b < 135 && r > g && g > b;
+  const strongGold = r > 140 && g > 95 && b < 145 && r > g && g > b;
   const warmIvory = r > 170 && g > 145 && b > 100 && (r - g) < 65 && (g - b) < 60;
-  return strongGold || warmIvory;
+  const bronze = r > 120 && g > 80 && b > 45 && b < 130 && (r - g) < 85;
+  return strongGold || warmIvory || bronze;
 }
 
-function _getRegionBounds(W, H, cx, cy, rx, ry, padX, padY) {
-  const x0 = Math.max(0, Math.floor(cx - rx - padX));
-  const y0 = Math.max(0, Math.floor(cy - ry - padY));
-  const x1 = Math.min(W, Math.ceil(cx + rx + padX));
-  const y1 = Math.min(H, Math.ceil(cy + ry + padY));
+function _getRegionBounds(W, H, cx, cy, radius, pad) {
+  const x0 = Math.max(0, Math.floor(cx - radius - pad));
+  const y0 = Math.max(0, Math.floor(cy - radius - pad));
+  const x1 = Math.min(W, Math.ceil(cx + radius + pad));
+  const y1 = Math.min(H, Math.ceil(cy + radius + pad));
   return { x0, y0, w: Math.max(0, x1 - x0), h: Math.max(0, y1 - y0) };
 }
 
@@ -152,53 +147,90 @@ function _drawCoverToCanvas(coverImg, W, H) {
   return { coverCanvas, coverCtx };
 }
 
-function _protectOrnamentPixels(ctx, coverCtx, cx, cy, rx, ry, W, H) {
-  const padX = Math.round(rx * 0.7);
-  const padY = Math.round(ry * 0.7);
-  const { x0, y0, w, h } = _getRegionBounds(W, H, cx, cy, rx, ry, padX, padY);
-  if (!w || !h) return 0;
-
-  const comp = ctx.getImageData(x0, y0, w, h);
-  const cov = coverCtx.getImageData(x0, y0, w, h);
-  const cd = comp.data;
-  const od = cov.data;
-  let restored = 0;
-
-  for (let py = 0; py < h; py++) {
-    const y = y0 + py;
-    for (let px = 0; px < w; px++) {
-      const x = x0 + px;
-      const idx = (py * w + px) * 4;
-      const nx = (x - cx) / rx;
-      const ny = (y - cy) / ry;
-      const d2 = nx * nx + ny * ny;
-
-      // Only guard ring/ornament zones near the oval edge.
-      if (d2 < 0.72 || d2 > 2.0) continue;
-
-      const r = od[idx];
-      const g = od[idx + 1];
-      const b = od[idx + 2];
-      if (!_isOrnamentPixel(r, g, b)) continue;
-
-      if (cd[idx] !== r || cd[idx + 1] !== g || cd[idx + 2] !== b || cd[idx + 3] !== od[idx + 3]) {
-        cd[idx] = r;
-        cd[idx + 1] = g;
-        cd[idx + 2] = b;
-        cd[idx + 3] = od[idx + 3];
-        restored++;
-      }
-    }
-  }
-
-  ctx.putImageData(comp, x0, y0);
-  return restored;
+function _angleDistance(a, b) {
+  const TAU = Math.PI * 2;
+  const d = Math.abs((a - b) % TAU);
+  return Math.min(d, TAU - d);
 }
 
-function _measureRingDiffPixels(ctx, coverCtx, cx, cy, rx, ry, W, H) {
-  const padX = Math.round(rx * 0.7);
-  const padY = Math.round(ry * 0.7);
-  const { x0, y0, w, h } = _getRegionBounds(W, H, cx, cy, rx, ry, padX, padY);
+function _innerRadiusAtAngle(radius, theta, scale = 1) {
+  const top = Math.exp(-Math.pow(_angleDistance(theta, (3 * Math.PI) / 2), 2) / 0.09);
+  const bottom = Math.exp(-Math.pow(_angleDistance(theta, Math.PI / 2), 2) / 0.16);
+  const right = Math.exp(-Math.pow(_angleDistance(theta, 0), 2) / 0.04);
+  const left = Math.exp(-Math.pow(_angleDistance(theta, Math.PI), 2) / 0.04);
+  const ovalBias = Math.cos(2 * theta);
+
+  let ratio =
+    MASK_BASE_RATIO -
+    MASK_TOP_INDENT_RATIO * top +
+    MASK_BOTTOM_EXPAND_RATIO * bottom -
+    MASK_SIDE_INDENT_RATIO * right -
+    MASK_SIDE_INDENT_RATIO * left -
+    MASK_OVAL_BIAS_RATIO * ovalBias;
+
+  ratio *= scale;
+  ratio = Math.max(0.58, Math.min(0.95, ratio));
+  return radius * ratio;
+}
+
+function _traceMaskPath(ctx, cx, cy, radius, scale = 1) {
+  ctx.beginPath();
+  for (let i = 0; i <= MASK_STEPS; i++) {
+    const theta = (i / MASK_STEPS) * Math.PI * 2;
+    const r = _innerRadiusAtAngle(radius, theta, scale);
+    const x = cx + r * Math.cos(theta);
+    const y = cy + r * Math.sin(theta);
+    if (i === 0) ctx.moveTo(x, y);
+    else ctx.lineTo(x, y);
+  }
+  ctx.closePath();
+}
+
+function _maskBounds(cx, cy, radius, scale = 1) {
+  let minX = Infinity;
+  let minY = Infinity;
+  let maxX = -Infinity;
+  let maxY = -Infinity;
+  for (let i = 0; i <= MASK_STEPS; i++) {
+    const theta = (i / MASK_STEPS) * Math.PI * 2;
+    const r = _innerRadiusAtAngle(radius, theta, scale);
+    const x = cx + r * Math.cos(theta);
+    const y = cy + r * Math.sin(theta);
+    minX = Math.min(minX, x);
+    minY = Math.min(minY, y);
+    maxX = Math.max(maxX, x);
+    maxY = Math.max(maxY, y);
+  }
+  return { minX, minY, maxX, maxY };
+}
+
+function _buildOverlayCanvas(coverImg, W, H, cx, cy, radius, scale = 1) {
+  const overlay = document.createElement('canvas');
+  overlay.width = W;
+  overlay.height = H;
+  const octx = overlay.getContext('2d');
+  octx.drawImage(coverImg, 0, 0, W, H);
+
+  octx.globalCompositeOperation = 'destination-out';
+  octx.fillStyle = 'rgba(0,0,0,1)';
+  _traceMaskPath(octx, cx, cy, radius, scale);
+  octx.fill();
+
+  // Soften only the cut edge very slightly to avoid jagged seams.
+  octx.globalAlpha = 0.25;
+  octx.lineWidth = 3;
+  octx.strokeStyle = 'rgba(0,0,0,1)';
+  _traceMaskPath(octx, cx, cy, radius, scale);
+  octx.stroke();
+  octx.globalAlpha = 1;
+  octx.globalCompositeOperation = 'source-over';
+
+  return overlay;
+}
+
+function _measureFrameDiffPixels(ctx, coverCtx, cx, cy, radius, W, H) {
+  const pad = Math.round(radius * 0.28);
+  const { x0, y0, w, h } = _getRegionBounds(W, H, cx, cy, radius, pad);
   if (!w || !h) return 0;
 
   const comp = ctx.getImageData(x0, y0, w, h).data;
@@ -210,11 +242,10 @@ function _measureRingDiffPixels(ctx, coverCtx, cx, cy, rx, ry, W, H) {
     for (let px = 0; px < w; px++) {
       const x = x0 + px;
       const idx = (py * w + px) * 4;
-      const nx = (x - cx) / rx;
-      const ny = (y - cy) / ry;
-      const d2 = nx * nx + ny * ny;
-
-      if (d2 < 0.72 || d2 > 2.0) continue;
+      const dx = x - cx;
+      const dy = y - cy;
+      const d = Math.hypot(dx, dy);
+      if (d < radius * 0.58 || d > radius * 1.2) continue;
 
       const r = cov[idx];
       const g = cov[idx + 1];
@@ -231,16 +262,41 @@ function _measureRingDiffPixels(ctx, coverCtx, cx, cy, rx, ry, W, H) {
   return diffPixels;
 }
 
+function _countOrnamentsCutByMask(overlayCtx, coverCtx, cx, cy, radius, W, H) {
+  const pad = Math.round(radius * 0.28);
+  const { x0, y0, w, h } = _getRegionBounds(W, H, cx, cy, radius, pad);
+  if (!w || !h) return 0;
+
+  const over = overlayCtx.getImageData(x0, y0, w, h).data;
+  const cov = coverCtx.getImageData(x0, y0, w, h).data;
+  let cut = 0;
+
+  for (let py = 0; py < h; py++) {
+    const y = y0 + py;
+    for (let px = 0; px < w; px++) {
+      const x = x0 + px;
+      const idx = (py * w + px) * 4;
+      const d = Math.hypot(x - cx, y - cy);
+      if (d < radius * 0.52 || d > radius * 1.05) continue;
+
+      if (over[idx + 3] > 8) continue; // not transparent => not cut from overlay
+
+      const r = cov[idx];
+      const g = cov[idx + 1];
+      const b = cov[idx + 2];
+      if (_isOrnamentPixel(r, g, b)) cut++;
+    }
+  }
+
+  return cut;
+}
+
 // ---------------------------------------------------------------------------
-// smartComposite — hard inner-oval replacement with ornament protection
+// smartComposite — source-overlay mask compositing
 // ---------------------------------------------------------------------------
 function smartComposite(coverImg, generatedImg, cx = 2850, cy = 1350, radius = 520) {
   const W = coverImg.width || 3784;
   const H = coverImg.height || 2777;
-
-  const innerCy = cy + Math.round(radius * CY_SHIFT_RATIO);
-  const baseRx = Math.round(radius * RX_RATIO);
-  const baseRy = Math.round(radius * RY_RATIO);
 
   const detailCenter = findBestCropCenter(generatedImg);
   const cropCenterX = Math.max(0.15, Math.min(0.85, detailCenter.x));
@@ -250,20 +306,22 @@ function smartComposite(coverImg, generatedImg, cx = 2850, cy = 1350, radius = 5
   let fallbackCanvas = null;
 
   for (let attempt = 0; attempt < MAX_COMPOSE_ATTEMPTS; attempt++) {
-    const scale = Math.max(SAFE_MIN_SHRINK, 1 - attempt * SHRINK_STEP);
-    const rx = Math.max(120, Math.round(baseRx * scale));
-    const ry = Math.max(180, Math.round(baseRy * scale));
+    const scale = Math.max(MASK_SCALE_MIN, MASK_SCALE_START - attempt * MASK_SCALE_STEP);
+    const mask = _maskBounds(cx, cy, radius, scale);
+    const maskW = Math.max(100, Math.round(mask.maxX - mask.minX));
+    const maskH = Math.max(100, Math.round(mask.maxY - mask.minY));
+    const drawW = Math.round(maskW * IMAGE_OVERDRAW_RATIO);
+    const drawH = Math.round(maskH * IMAGE_OVERDRAW_RATIO);
+    const drawX = Math.round(cx - drawW / 2);
+    const drawY = Math.round(cy - drawH / 2);
 
     const canvas = document.createElement('canvas');
     canvas.width = W;
     canvas.height = H;
     const ctx = canvas.getContext('2d');
 
-    // Layer 1: original cover untouched.
-    ctx.drawImage(coverImg, 0, 0, W, H);
-
-    // Layer 2: generated art clipped to inner oval only.
-    const destAspect = rx / ry;
+    // Layer 1: generated art base (will be masked by cover overlay).
+    const destAspect = drawW / drawH;
     const { srcX, srcY, srcW, srcH } = _fitSourceRectToDestAspect(
       generatedImg.width,
       generatedImg.height,
@@ -272,38 +330,33 @@ function smartComposite(coverImg, generatedImg, cx = 2850, cy = 1350, radius = 5
       cropCenterY
     );
 
-    ctx.save();
-    ctx.beginPath();
-    ctx.ellipse(cx, innerCy, rx, ry, 0, 0, Math.PI * 2);
-    ctx.closePath();
-    ctx.clip();
     ctx.drawImage(
       generatedImg,
       srcX,
       srcY,
       srcW,
       srcH,
-      cx - rx,
-      innerCy - ry,
-      rx * 2,
-      ry * 2
+      drawX,
+      drawY,
+      drawW,
+      drawH
     );
-    ctx.restore();
 
-    // Layer 3: hard safety pass — restore everything outside oval from cover.
-    _restoreCoverOutsideEllipse(ctx, coverImg, W, H, cx, innerCy, rx, ry);
+    // Layer 2: source cover overlay with transparent medallion opening.
+    const overlayCanvas = _buildOverlayCanvas(coverImg, W, H, cx, cy, radius, scale);
+    ctx.drawImage(overlayCanvas, 0, 0);
 
-    // Layer 4: restore ornament/ring pixels from the original cover.
-    const restored = _protectOrnamentPixels(ctx, coverCtx, cx, innerCy, rx, ry, W, H);
-    const ringDiff = _measureRingDiffPixels(ctx, coverCtx, cx, innerCy, rx, ry, W, H);
+    const overlayCtx = overlayCanvas.getContext('2d');
+    const frameDiff = _measureFrameDiffPixels(ctx, coverCtx, cx, cy, radius, W, H);
+    const cutOrnaments = _countOrnamentsCutByMask(overlayCtx, coverCtx, cx, cy, radius, W, H);
 
     console.log(
-      `[Compositor v7] attempt=${attempt + 1}/${MAX_COMPOSE_ATTEMPTS} scale=${scale.toFixed(2)} ` +
-      `inner=(${cx},${innerCy}) rx=${rx} ry=${ry} restored=${restored} ringDiff=${ringDiff}`
+      `[Compositor v8 overlay] attempt=${attempt + 1}/${MAX_COMPOSE_ATTEMPTS} scale=${scale.toFixed(2)} ` +
+      `draw=(${drawW}x${drawH}) frameDiff=${frameDiff} cutOrnaments=${cutOrnaments}`
     );
 
     fallbackCanvas = canvas;
-    if (ringDiff <= MAX_RING_DIFF_PIXELS) {
+    if (frameDiff <= MAX_FRAME_DIFF_PIXELS && cutOrnaments <= MAX_CUT_ORNAMENT_PIXELS) {
       return canvas;
     }
   }
