@@ -1,6 +1,6 @@
-# PROMPT-07 — Generation Quality, Compositor Fix & Gemini Direct API
+# PROMPT-07 — Generation Quality, Compositor Fix & Enhanced Prompts
 
-**Priority:** CRITICAL — All items in Part A must be completed and verified before moving to Parts B-D.
+**Priority:** CRITICAL — All items in Part A must be completed and verified before moving to Parts B-C.
 
 **Branch:** `main`  
 **After every file save:** `git add -A && git commit && git push`
@@ -25,10 +25,9 @@ The Alexandria Cover Designer v2 is a browser-based static site (HTML/CSS/JS) de
 **What's broken / needs improvement (this prompt):**
 1. Generated images display OVER ornaments (z-order bug in compositor).
 2. Dashboard doesn't show generated covers in results.
-3. Need Google Gemini models via direct API (not just OpenRouter).
-4. Prompts need much more color, variation, and richness — specifically Sevastopol/Cossack-style prompts.
-5. Prompt save functionality needs to work end-to-end.
-6. Per-cover medallion auto-detection is needed (currently uses fixed geometry).
+3. Prompts need much more color, variation, and richness — specifically Sevastopol/Cossack-style prompts.
+4. Prompt save functionality needs to work end-to-end.
+5. Per-cover medallion auto-detection is needed (currently uses fixed geometry).
 
 ---
 
@@ -357,149 +356,14 @@ Remove the exported constants `MEDALLION_CX`, `MEDALLION_CY`, `MEDALLION_RADIUS`
 
 ---
 
-## PART B — Add Google Gemini Direct API
-
-### Problem
-Currently all image generation goes through OpenRouter. Tim wants to also support Google's Gemini image generation models via their direct API (using the Google Cloud API key), which is cheaper and offers free-tier access.
-
-### Required Changes
-
-#### B1. New File: `js/gemini.js`
-
-Create a new module for direct Gemini API calls. The Google Generative AI REST endpoint is:
-```
-POST https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent
-```
-
-**Supported models for image generation:**
-- `gemini-3.1-flash-image-preview` (Nano Banana 2) — $0.006/img via OpenRouter, much cheaper direct
-- `gemini-3-pro-image-preview` (Nano Banana Pro) — $0.01/img via OpenRouter, cheaper direct
-- `gemini-2.5-flash-image` (Nano Banana) — $0.003/img via OpenRouter, free tier available direct
-
-```js
-// gemini.js — Direct Google Gemini API for image generation
-
-const GEMINI_MODELS = [
-  { id: 'gemini-nano-banana-pro',  model: 'gemini-3-pro-image-preview',       label: 'Nano Banana Pro (Direct)',  cost: 0.008 },
-  { id: 'gemini-nano-banana-2',    model: 'gemini-3.1-flash-image-preview',   label: 'Nano Banana 2 (Direct)',   cost: 0.004 },
-  { id: 'gemini-nano-banana',      model: 'gemini-2.5-flash-image',           label: 'Nano Banana (Direct)',     cost: 0.002 },
-];
-
-async function generateImageGemini(prompt, modelId, apiKey, signal) {
-  const modelDef = GEMINI_MODELS.find(m => m.id === modelId);
-  if (!modelDef) throw new Error(`Unknown Gemini model: ${modelId}`);
-  
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelDef.model}:generateContent?key=${apiKey}`;
-  
-  const body = {
-    contents: [{
-      parts: [{ text: prompt }]
-    }],
-    generationConfig: {
-      responseModalities: ['TEXT', 'IMAGE']
-    }
-  };
-  
-  const resp = await fetch(url, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
-    signal: signal
-  });
-  
-  if (!resp.ok) {
-    const errText = await resp.text();
-    console.error(`[Gemini ${modelId}] API error ${resp.status}:`, errText.substring(0, 300));
-    throw new Error(`Gemini API error ${resp.status}: ${errText.substring(0, 200)}`);
-  }
-  
-  const data = await resp.json();
-  return data;
-}
-
-function extractImageFromGeminiResponse(data) {
-  try {
-    if (!data.candidates || !data.candidates[0]) return null;
-    const parts = data.candidates[0].content?.parts;
-    if (!parts) return null;
-    
-    for (const part of parts) {
-      if (part.inlineData) {
-        return `data:${part.inlineData.mimeType};base64,${part.inlineData.data}`;
-      }
-    }
-    return null;
-  } catch (e) {
-    console.error('[Gemini] Failed to extract image:', e);
-    return null;
-  }
-}
-
-window.GeminiAPI = {
-  GEMINI_MODELS,
-  generateImageGemini,
-  extractImageFromGeminiResponse
-};
-```
-
-#### B2. Update `index.html`
-
-Add the script tag for `js/gemini.js` right after `js/openrouter.js`:
-```html
-<script src="js/gemini.js"></script>
-```
-
-#### B3. Update Settings Page (`js/pages/settings.js`)
-
-Add a "Google API Key" field alongside the existing "OpenRouter API Key" field. Store it in IndexedDB settings as `googleApiKey`.
-
-#### B4. Update Model Selection in Iterate Page (`js/pages/iterate.js`)
-
-The model selection UI needs to show both OpenRouter models AND Gemini Direct models. Group them:
-- **OpenRouter Models** (existing list from `js/openrouter.js`)
-- **Google Direct Models** (new list from `js/gemini.js`)
-
-When a Gemini Direct model is selected, use `GeminiAPI.generateImageGemini()` instead of `OpenRouter.generateImage()`. Route based on the model ID prefix (`gemini-` → direct API, everything else → OpenRouter).
-
-#### B5. Update Generation Pipeline
-
-In the iterate page's generation function, add routing logic:
-
-```js
-// In the generation loop for each variant:
-let imageDataUrl;
-if (modelId.startsWith('gemini-')) {
-  // Use direct Gemini API
-  const googleApiKey = await DB.getSetting('googleApiKey');
-  if (!googleApiKey) throw new Error('Google API key not configured. Go to Settings.');
-  const response = await GeminiAPI.generateImageGemini(prompt, modelId, googleApiKey, signal);
-  imageDataUrl = GeminiAPI.extractImageFromGeminiResponse(response);
-} else {
-  // Use OpenRouter
-  const apiKey = await DB.getSetting('openRouterApiKey');
-  const response = await OpenRouter.generateImage(prompt, modelId, apiKey, signal, timeoutMs);
-  imageDataUrl = OpenRouter.extractImageFromResponse(response);
-}
-```
-
-### Acceptance Criteria (Part B)
-
-- [ ] Settings page shows both "OpenRouter API Key" and "Google API Key" fields.
-- [ ] Model selection dropdown shows Gemini Direct models in a separate group.
-- [ ] Generating with a Gemini Direct model calls the Google API endpoint (not OpenRouter).
-- [ ] Generated images from Gemini Direct models are correctly extracted and composited.
-- [ ] Error handling works when Google API key is missing or invalid.
-
----
-
-## PART C — Improved Prompts with Color & Variation
+## PART B — Improved Prompts with Color & Variation
 
 ### Problem
 Current prompts produce illustrations that lack color variety and richness. Tim specifically wants Sevastopol/Cossack-style prompts (dramatic, colorful, military/epic) plus diverse classical styles. The 10 built-in seed prompts need to be replaced with much richer, more colorful versions.
 
 ### Required Changes to `js/style-diversifier.js`
 
-#### C1. Replace the STYLE_POOL
+#### B1. Replace the STYLE_POOL
 
 Replace the entire `STYLE_POOL` array with 20 enhanced styles (the system randomly picks 10 for each batch). Every style modifier must explicitly describe vivid colors, specific color palettes, and strong visual character. The prompt template structure remains the same.
 
@@ -618,7 +482,7 @@ const STYLE_POOL = [
 ];
 ```
 
-#### C2. Update the Prompt Template in `buildDiversifiedPrompt`
+#### B2. Update the Prompt Template in `buildDiversifiedPrompt`
 
 The base prompt also needs enhancement. Replace the current template with a richer version that explicitly asks for colorful, detailed output:
 
@@ -640,7 +504,7 @@ CRITICAL COMPOSITION RULES:
 }
 ```
 
-#### C3. Update Built-in Seed Prompts
+#### B3. Update Built-in Seed Prompts
 
 In `js/pages/prompts.js`, update the `seedBuiltInPrompts()` function to use 10 enhanced templates that match the new style pool. The seed prompts should be the first 10 from the STYLE_POOL:
 
@@ -655,9 +519,9 @@ In `js/pages/prompts.js`, update the `seedBuiltInPrompts()` function to use 10 e
 9. Ukiyo-e Woodblock
 10. Film Noir
 
-Each seed prompt should use the full enhanced prompt template from C2 with `{title}` and `{author}` placeholders and the corresponding style modifier baked in.
+Each seed prompt should use the full enhanced prompt template from B2 with `{title}` and `{author}` placeholders and the corresponding style modifier baked in.
 
-### Acceptance Criteria (Part C)
+### Acceptance Criteria (Part B)
 
 - [ ] `STYLE_POOL` has 20 rich, colorful styles with explicit color palettes.
 - [ ] Every style modifier mentions at least 5 specific colors by name.
@@ -667,9 +531,9 @@ Each seed prompt should use the full enhanced prompt template from C2 with `{tit
 
 ---
 
-## PART D — Dashboard & Prompt Save Fixes
+## PART C — Dashboard & Prompt Save Fixes
 
-### D1. Dashboard Generated Covers Display
+### C1. Dashboard Generated Covers Display
 
 The dashboard (`js/pages/dashboard.js`) should show recent generated covers. Check that:
 
@@ -679,7 +543,7 @@ The dashboard (`js/pages/dashboard.js`) should show recent generated covers. Che
 
 Verify that the IndexedDB store used by the iterate page to save results (`generations` or `results` store) is the same store queried by the dashboard. This is the most common cause of "dashboard doesn't show results" — mismatched store names or key structures.
 
-### D2. Prompt Save End-to-End
+### C2. Prompt Save End-to-End
 
 Ensure the full prompt save flow works:
 
@@ -697,7 +561,7 @@ Ensure the full prompt save flow works:
 
 3. **Prompt template selection on Iterate:** When a user selects a saved prompt template from the dropdown, its text should load into the custom prompt textarea. Verify `{title}` and `{author}` placeholders are replaced at generation time.
 
-### Acceptance Criteria (Part D)
+### Acceptance Criteria (Part C)
 
 - [ ] Dashboard shows generated covers after running a generation job.
 - [ ] Star/save button on result cards saves the prompt to IndexedDB.
@@ -712,14 +576,14 @@ Ensure the full prompt save flow works:
 
 After implementing all parts, run this verification sequence:
 
-1. **Start the app** and navigate to Settings. Enter/verify both API keys are saved.
+1. **Start the app** and navigate to Settings. Enter/verify the OpenRouter API key is saved.
 2. **Go to Iterate.** Select a book (try book #50 or so). 
-3. **Select Nano Banana 2 (Direct)** from the Gemini Direct group. Set variants to 2. Generate.
+3. **Select Nano Banana 2** (or any available model). Set variants to 2. Generate.
 4. **Verify:** Images appear, are composited correctly with ornaments intact, show colorful detailed art.
 5. **Click the star button** on one result to save the prompt.
 6. **Go to Dashboard.** Verify the generated covers appear.
 7. **Go to Prompts page.** Verify the saved prompt appears.
-8. **Go back to Iterate.** Select a different book. Choose the saved prompt from the template dropdown. Generate with an OpenRouter model (e.g., FLUX.2 Klein). Verify it works.
+8. **Go back to Iterate.** Select a different book. Choose the saved prompt from the template dropdown. Generate with a different model (e.g., FLUX.2 Klein). Verify it works.
 9. **Repeat steps 2-4 with 3 more books** to verify compositor auto-detection works across different covers.
 10. **Check console logs** for `[Compositor v9]` messages showing detected geometry per cover.
 
@@ -730,13 +594,9 @@ After implementing all parts, run this verification sequence:
 | File | Action | Description |
 |------|--------|-------------|
 | `js/compositor.js` | **REWRITE** | v9: per-cover auto-detection, transparent-center template, content-aware zoom |
-| `js/gemini.js` | **NEW** | Direct Google Gemini API module |
 | `js/style-diversifier.js` | **REWRITE** | 20 enhanced colorful styles, improved prompt template |
-| `js/pages/settings.js` | **MODIFY** | Add Google API key field |
-| `js/pages/iterate.js` | **MODIFY** | Add Gemini Direct model routing, model group display |
 | `js/pages/dashboard.js` | **VERIFY/FIX** | Ensure generated covers display correctly |
 | `js/pages/prompts.js` | **MODIFY** | Update seed prompts, verify CRUD and star-save |
-| `index.html` | **MODIFY** | Add `<script src="js/gemini.js">` |
 
 ---
 
@@ -744,5 +604,5 @@ After implementing all parts, run this verification sequence:
 
 After all changes are verified:
 ```bash
-git add -A && git commit -m "feat: compositor v9, Gemini direct API, enhanced prompts, dashboard fixes" && git push
+git add -A && git commit -m "feat: compositor v9, enhanced prompts, dashboard fixes" && git push
 ```
