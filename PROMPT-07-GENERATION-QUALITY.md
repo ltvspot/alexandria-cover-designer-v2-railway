@@ -7,9 +7,36 @@
 
 ---
 
+## ⚠️ DESIGN PRESERVATION — DO NOT CHANGE
+
+The current UI/UX design MUST remain exactly as-is. This includes:
+- Dark navy sidebar with gold "Alexandria" branding
+- Section groups: GENERATE (Iterate, Batch, Jobs), REVIEW (Review, Compare, Similarity, Mockups), INSIGHTS (Dashboard, History, Analytics), CONFIGURE (Catalogs, Prompts, Settings, API Docs)
+- Model cards with pricing, provider badges, description
+- Quick/Advanced toggle on Iterate page
+- Book dropdown with Sync button
+- Cost tracker badge ($X.XX / $50.00) and book count badge (999 books)
+- All page layouts, color schemes, typography, and navigation structure
+
+**Only modify the specific files listed in this prompt. Do not touch `index.html`, `css/style.css`, `js/app.js` (routing/navigation), or any page file not explicitly listed below.**
+
+---
+
+## File Path Reference
+
+All JS files are in the `js/` directory (NOT `src/static/js/`):
+- `js/compositor.js` — canvas compositing
+- `js/style-diversifier.js` — style pool + prompt builder
+- `js/pages/dashboard.js` — dashboard page
+- `js/pages/prompts.js` — prompts page
+- `js/pages/iterate.js` — iterate page (reference only, minimal changes)
+- `js/db.js` — IndexedDB layer (reference only)
+
+---
+
 ## Context
 
-The Alexandria Cover Designer v2 is a browser-based static site (HTML/CSS/JS) deployed via S3 with CGI-bin backend scripts. It generates AI illustrations for 999 classic book covers, compositing them into ornamental gold-framed medallion covers fetched from Google Drive.
+The Alexandria Cover Designer v2 is a browser-based static site (HTML/CSS/JS) deployed on Railway with a Node.js server (`server.js`) and CGI-bin backend scripts. It generates AI illustrations for 999 classic book covers, compositing them into ornamental gold-framed medallion covers fetched from Google Drive.
 
 **Current architecture:**
 - Frontend: Vanilla JS, no framework. Key files in `js/` directory.
